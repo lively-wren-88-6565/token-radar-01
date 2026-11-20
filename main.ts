@@ -1,4 +1,4 @@
-// Token Radar (radar-2): the entrypoint the grader runs.
+// Token Radar (radar-4): the entrypoint the grader runs.
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
 // scores every rankable pre-token protocol with the model in lib/model.ts,

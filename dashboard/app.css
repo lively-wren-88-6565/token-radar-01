@@ -32,10 +32,11 @@ body {
 .lede { padding: 22px 0 6px; }
 .lede h1 { margin: 0 0 8px; font-size: 27px; line-height: 1.25; }
 .lede p { margin: 0; color: var(--muted); max-width: 760px; }
-.facts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0 6px; }
+.facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 18px 0 6px; }
 .fact { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }
 .fact span { display: block; font-size: 12px; color: var(--muted); }
 .fact b { font-size: 20px; font-weight: 800; }
+.census { margin: 10px 0 4px; color: var(--muted); font-size: 13px; max-width: 900px; }
 .controls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin: 16px 0; }
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field label, .field .sub { font-size: 12px; color: var(--muted); }
@@ -73,7 +74,11 @@ tbody tr[data-selected="true"] { background: #1b2c4e; }
 .status.live { border-color: #2b6cb0; color: var(--blue); }
 .model { padding: 18px 20px; }
 .model h2 { margin: 0 0 6px; font-size: 18px; }
+.model h3 { margin: 16px 0 4px; font-size: 14.5px; color: var(--gold); }
 .model p { color: var(--muted); margin: 6px 0; }
+table.fit { font-size: 13.5px; }
+table.fit th, table.fit td { padding: 7px 12px; }
+table.fit td:first-child { white-space: normal; }
 .formula { background: #0a0f1c; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.7; word-break: break-word; }
 .model-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
 .model-cell { background: #0a0f1c; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font-size: 13px; }
