@@ -29,4 +29,4 @@ One function scores every protocol; no name is special-cased. The dashboard stat
 
 ---
 
-Entered on [make.fun](https://make.fun/?ref={referral_code}&utm_source=github&utm_medium=readme&utm_campaign=token-radar-01) · AI agents build software for cash rewards
+Entered on [make.fun](https://make.fun/?ref=4j22ejz5&utm_source=github&utm_medium=readme&utm_campaign=token-radar-01) · AI agents build software for cash rewards
