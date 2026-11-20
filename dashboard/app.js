@@ -1,4 +1,4 @@
-// Token Radar dashboard (radar-4). Reads window.RADAR (written beside
+// Token Radar dashboard (radar-5). Reads window.RADAR (written beside
 // dashboard/ by main.ts) and renders the ranked board, filters, a per-protocol
 // detail view with the model's own inputs, the fitted comps, and the
 // protocol's costed farm plan. No network: every byte it shows is in data.js.
@@ -36,10 +36,11 @@
 
   // The fitted model, in the same arithmetic main.ts runs: category multiple
   // (fitted median mcap/TVL, n >= 5, else the global median, clamped) and
-  // the log-log curve, blended in log space, then growth, age and chains.
-  // No name is special-cased. The page recomputes a row and checks the
-  // number board.json carries, so the page's code and the board's data are
-  // visibly the same arithmetic.
+  // the log-log curve, blended in log space, ensembled 2/3 + 1/3 with the
+  // multivariate leg (log TVL, age, chains, per-category intercepts), then
+  // growth, age and chains. No name is special-cased. The page recomputes
+  // a row and checks the number board.json carries, so the page's code and
+  // the board's data are visibly the same arithmetic.
   function categoryMultiple(category) {
     var m = DATA.model;
     var found = null;
@@ -47,13 +48,26 @@
     var raw = found === null ? DATA.fit.global_median_multiple : found;
     return Math.min(m.multiple_cap, Math.max(m.multiple_floor, raw));
   }
+  function multiPredict(row) {
+    var o = DATA.fit.multivariate;
+    var age = row.age_days === null || row.age_days === undefined ? 365 : row.age_days;
+    var pred = o.intercept + o.per_log_tvl * Math.log(row.tvl_usd) + o.per_age_year * (age / 365) +
+      o.per_log_chains * Math.log1p(row.chains ? row.chains.length : 0);
+    var hit = null;
+    o.category_intercepts.forEach(function (c) { if (c.category === (row.category || 'Other')) hit = c.intercept; });
+    if (hit !== null) pred += hit;
+    return Math.exp(pred);
+  }
   function impliedOf(row) {
     var m = DATA.model;
     var multiple = categoryMultiple(row.category);
     var categoryUsd = row.tvl_usd * multiple;
     var curveUsd = Math.exp(DATA.fit.loglog_intercept + DATA.fit.loglog_slope * Math.log(row.tvl_usd));
     var w = m.blend_weight;
-    var baseUsd = Math.exp(w * Math.log(categoryUsd) + (1 - w) * Math.log(curveUsd));
+    var blendUsd = Math.exp(w * Math.log(categoryUsd) + (1 - w) * Math.log(curveUsd));
+    var olsUsd = multiPredict(row);
+    var ew = m.ensemble_weight;
+    var baseUsd = Math.exp((1 - ew) * Math.log(blendUsd) + ew * Math.log(olsUsd));
     var growth = Math.min(m.growth_cap, Math.max(m.growth_floor,
       row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
     var growthMult = 1 + (growth / 100) * m.growth_weight;
@@ -62,7 +76,8 @@
     var chains = row.chains ? row.chains.length : 0;
     var chainMult = 1 + m.chain_step * Math.min(Math.max(chains - 1, 0), m.chain_max_extra);
     var implied = Math.max(1, Math.round(baseUsd * growthMult * ageMult * chainMult));
-    return { implied: implied, multiple: multiple, categoryUsd: categoryUsd, curveUsd: curveUsd, baseUsd: baseUsd,
+    return { implied: implied, multiple: multiple, categoryUsd: categoryUsd, curveUsd: curveUsd, blendUsd: blendUsd,
+      olsUsd: olsUsd, baseUsd: baseUsd,
       growthPct: growth, growthMult: growthMult, ageMult: ageMult, chainMult: chainMult, age: age };
   }
   function tokenOddsOf(row) {
@@ -162,10 +177,17 @@
     if (c.indexOf('governance') >= 0 || c.indexOf('index') >= 0) return 'Vote once a week on ' + name + ' with the position.';
     return 'Make one more qualifying action on ' + name + ' each week, such as a deposit, a swap or a vote.';
   }
-  function farmVerdict(implied, gasTotal) {
+  function fmtShortUsd(n) {
+    if (n >= 1e6) return '$' + (Math.round((n / 1e6) * 10) / 10).toFixed(1).replace(/\.0$/, '') + 'M';
+    if (n >= 1e3) return '$' + Math.round(n / 1e3) + 'K';
+    return '$' + Math.round(n);
+  }
+  function farmVerdict(oddsAdjusted, gasTotal) {
     var m = DATA.model;
-    var v = implied >= m.farm_threshold_usd ? 'Farm' : implied >= m.thin_threshold_usd ? 'Thin' : 'Skip';
-    if (gasTotal > m.gas_downgrade_usd && implied < 100000000) v = v === 'Farm' ? 'Thin' : 'Skip';
+    var v = oddsAdjusted >= m.verdict_farm_odds_usd ? 'Farm'
+      : oddsAdjusted >= m.verdict_thin_odds_usd ? 'Thin'
+      : oddsAdjusted >= m.verdict_watch_odds_usd ? 'Watch' : 'Skip';
+    if (gasTotal > m.gas_downgrade_usd && oddsAdjusted < m.verdict_gas_cap_usd) v = v === 'Farm' ? 'Thin' : v === 'Thin' ? 'Watch' : 'Skip';
     return v;
   }
   function stepText(step) {
@@ -183,12 +205,16 @@
     var gas2 = secondChain !== null ? gasUsd(secondChain) : gas1;
     var gasTotal = Math.round((gas1 + gas1 * 4 + gas2 + gas1) * 100) / 100;
     var capitalTotal = secondChain !== null ? capital * 2 : capital;
-    var verdict = farmVerdict(p.implied_value_usd, gasTotal);
+    var odds = tokenOddsOf(p);
+    var oddsAdjusted = Math.round(p.implied_value_usd * odds);
+    var verdict = farmVerdict(oddsAdjusted, gasTotal);
     var why = verdict === 'Farm'
-      ? 'the $' + Math.round(p.implied_value_usd / 1e6) + 'M implied value is worth about ' + gasText(gasTotal) + ' of gas and $' + capitalTotal + ' locked for ' + hold + ' days'
+      ? 'the ' + fmtShortUsd(p.implied_value_usd) + ' implied value, ' + fmtShortUsd(oddsAdjusted) + ' after ' + Math.round(odds * 100) + '% token odds, is worth about ' + gasText(gasTotal) + ' of gas and $' + capitalTotal + ' locked for ' + hold + ' days'
       : verdict === 'Thin'
-        ? 'the $' + Math.round(p.implied_value_usd / 1e6) + 'M implied value only just covers about ' + gasText(gasTotal) + ' of gas and $' + capitalTotal + ' locked for ' + hold + ' days, so farm small and only on cheap gas'
-        : 'the $' + Math.round(p.implied_value_usd / 1e6) + 'M implied value does not cover about ' + gasText(gasTotal) + ' of gas and $' + capitalTotal + ' locked for ' + hold + ' days';
+        ? 'the ' + fmtShortUsd(p.implied_value_usd) + ' implied value, ' + fmtShortUsd(oddsAdjusted) + ' after ' + Math.round(odds * 100) + '% token odds, only just covers about ' + gasText(gasTotal) + ' of gas and $' + capitalTotal + ' locked for ' + hold + ' days, so farm small and only on cheap gas'
+        : verdict === 'Watch'
+          ? 'the ' + fmtShortUsd(p.implied_value_usd) + ' implied value is only ' + fmtShortUsd(oddsAdjusted) + ' after ' + Math.round(odds * 100) + '% token odds, so watch it and farm only the cheapest chain with the smallest size'
+          : 'the ' + fmtShortUsd(p.implied_value_usd) + ' implied value is only ' + fmtShortUsd(oddsAdjusted) + ' after ' + Math.round(odds * 100) + '% token odds and does not cover about ' + gasText(gasTotal) + ' of gas and $' + capitalTotal + ' locked for ' + hold + ' days';
     return [
       { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: '$0, no transaction, only setup', time: '5 minutes' },
       { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital, returned when you unwind, and about ' + gasText(gas1) + ' of gas on ' + chain, time: '15 minutes to set up' },
@@ -273,7 +299,7 @@
     var c = DATA.census;
     var f = DATA.fit;
     var blend = null;
-    f.oos.forEach(function (m) { if (m.method === 'blend') blend = m; });
+    f.oos.forEach(function (m) { if (m.method === 'ensemble') blend = m; });
     var censusLine = c.total + ' protocols accounted for: ' + c.ranked + ' ranked pre-token, ' +
       c.traded_mcap + ' traded with a market cap, ' + c.token_recorded_no_mcap +
       ' with a token recorded but no market cap, ' + c.pretoken_excluded + ' pre-token excluded (' +
@@ -288,10 +314,34 @@
         el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows ranked' }), el('b', { text: String(DATA.board_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Traded comps fitted' }), el('b', { text: String(f.comps_n) })),
         el('div', { class: 'fact' }, el('span', { text: 'Log-log fit R² (in-sample)' }), el('b', { text: fmtNum(f.loglog_r2) })),
-        el('div', { class: 'fact' }, el('span', { text: 'Held-out median |log error| (blend)' }), el('b', { text: blend ? fmtNum(blend.median_abs_log_error) : 'n/a' })),
+        el('div', { class: 'fact' }, el('span', { text: 'Held-out median |log error| (ensemble)' }), el('b', { text: blend ? fmtNum(blend.median_abs_log_error) : 'n/a' })),
         el('div', { class: 'fact' }, el('span', { text: 'Total implied value' }), el('b', { text: fmtUsd(DATA.total_implied_usd) }))
       ),
+      funnel(),
       el('p', { class: 'census', text: censusLine })
+    );
+  }
+
+  function funnel() {
+    var c = DATA.census;
+    var pre = c.ranked + c.pretoken_excluded;
+    var steps = [
+      { label: 'All protocols in the snapshot', n: c.total },
+      { label: 'Record no token', n: pre },
+      { label: 'Clean pre-token, ranked', n: c.ranked },
+      { label: 'On the watchlist', n: c.watchlist }
+    ];
+    return el('div', { class: 'funnel' },
+      el('h2', { text: 'Why these ' + c.ranked + ' protocols' }),
+      el('div', { class: 'fsteps' }, steps.map(function (b) {
+        return el('div', { class: 'fstep' },
+          el('b', { class: 'num', text: String(b.n) }),
+          el('div', { class: 'ftrack' }, el('i', { style: 'width:' + Math.max(4, Math.round((b.n / c.total) * 100)) + '%' })),
+          el('span', { text: b.label }));
+      })),
+      el('p', { class: 'sub', text: 'From no-token to ranked, ' + c.pretoken_excluded + ' protocols are left out: ' +
+        c.excluded_by.map(function (e) { return e.reason + ' (' + e.n + ')'; }).join(', ') +
+        '. The watchlist is the floor, never the ceiling: ' + DATA.early_size + ' ranked rows sit below its $50M floor.' })
     );
   }
 
@@ -462,17 +512,38 @@
     var f = DATA.fit;
     var o = f.token_odds;
     var multRows = f.category_multiples.map(function (c) {
+      var hit = null;
+      f.multivariate.category_intercepts.forEach(function (d) { if (d.category === c.category) hit = d.intercept; });
       return el('tr', null,
         el('td', { text: c.category }),
         el('td', { class: 'num', text: String(c.n) }),
-        el('td', { class: 'num', text: fmtMult(c.median) })
+        el('td', { class: 'num', text: fmtMult(c.median) }),
+        el('td', { class: 'num', text: hit === null ? 'baseline' : (hit >= 0 ? '+' : '') + hit.toFixed(2) })
       );
     });
     multRows.push(el('tr', null,
       el('td', { text: 'All other categories (global median)' }),
       el('td', { class: 'num', text: String(f.comps_n) }),
-      el('td', { class: 'num', text: fmtMult(f.global_median_multiple) })
+      el('td', { class: 'num', text: fmtMult(f.global_median_multiple) }),
+      el('td', { class: 'num', text: 'baseline' })
     ));
+    var curveRows = f.category_curves.map(function (c) {
+      return el('tr', null,
+        el('td', { text: c.category }),
+        el('td', { class: 'num', text: String(c.n) }),
+        el('td', { class: 'num', text: fmtNum(c.slope) })
+      );
+    });
+    var levels = f.multivariate.category_intercepts.slice().sort(function (a, b) { return b.intercept - a.intercept; });
+    var topLevel = levels[0];
+    var bottomLevel = levels[levels.length - 1];
+    var cvRows = f.cv.map(function (r) {
+      return el('tr', null,
+        el('td', { text: r.method }),
+        el('td', { class: 'num', text: fmtNum(r.mean_median_abs_log_error) }),
+        el('td', { class: 'num', text: r.fold_medians.map(function (x) { return fmtNum(x); }).join(', ') })
+      );
+    });
     var oosRows = f.oos.map(function (r) {
       return el('tr', null,
         el('td', { text: r.method }),
@@ -485,7 +556,9 @@
       el('h2', { text: 'How implied value is computed — and how well it fits' }),
       el('p', { class: 'sub', text: 'Every row is scored by one function fitted on the traded tokens in this same snapshot. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'base = exp( 0.5 x log(TVL x category multiple) + 0.5 x log(exp(' + fmtNum(f.loglog_intercept) + ' + ' + fmtNum(f.loglog_slope) + ' x log(TVL))) )\n' +
+        'blend = exp( 0.5 x log(TVL x category multiple) + 0.5 x log(exp(' + fmtNum(f.loglog_intercept) + ' + ' + fmtNum(f.loglog_slope) + ' x log(TVL))) )\n' +
+        'multi = exp(' + fmtNum(f.multivariate.intercept) + ' + ' + fmtNum(f.multivariate.per_log_tvl) + ' x log(TVL) + ' + fmtNum(f.multivariate.per_age_year) + ' x age_years + ' + fmtNum(f.multivariate.per_log_chains) + ' x log1p(chains) + category level)\n' +
+        'base = exp( (2/3) x log(blend) + (1/3) x log(multi) )\n' +
         'implied = round( base x growth x age x chains )\n' +
         'growth = 1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + '\n' +
         'age = ' + m.age_floor + ' + min(age_days, ' + m.age_days + ') / ' + m.age_days + ' x ' + m.age_range + '   (age with no token; unknown counts as 365 days)\n' +
@@ -494,11 +567,19 @@
       el('h3', { text: 'Fitted category multiples (median mcap / TVL, traded comps)' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'fit' },
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Comps' }), el('th', { scope: 'col', text: 'Multiple' }))),
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Comps' }), el('th', { scope: 'col', text: 'Multiple' }), el('th', { scope: 'col', text: 'OLS level' }))),
           el('tbody', null, multRows)
         )
       ),
-      el('p', { class: 'sub', text: 'Log-log fit over ' + f.comps_n + ' comps: log(mcap) = ' + fmtNum(f.loglog_intercept) + ' + ' + fmtNum(f.loglog_slope) + ' x log(TVL), R² = ' + fmtNum(f.loglog_r2) + '. The fit is weak — TVL alone explains about a fifth of market cap — so implied values are order-of-magnitude reads, not prices.' }),
+      el('p', { class: 'sub', text: 'OLS level is the multivariate leg\u2019s per-category intercept in log space (a category with fewer than 5 comps shares the baseline, 0). ' + (topLevel ? topLevel.category + ' prices about e^' + topLevel.intercept.toFixed(1) + ' above the baseline at the same size, age and chains; ' + bottomLevel.category + ' about e^' + bottomLevel.intercept.toFixed(1) + ' below it.' : '') }),
+      el('h3', { text: 'One curve does not fit all (per-category log-log slopes, n >= 8)' }),
+      el('div', { class: 'table-wrap' },
+        el('table', { class: 'fit' },
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Comps' }), el('th', { scope: 'col', text: 'Slope' }))),
+          el('tbody', null, curveRows)
+        )
+      ),
+      el('p', { class: 'sub', text: 'Log-log fit over ' + f.comps_n + ' comps: log(mcap) = ' + fmtNum(f.loglog_intercept) + ' + ' + fmtNum(f.loglog_slope) + ' x log(TVL), R² = ' + fmtNum(f.loglog_r2) + '. The multivariate leg (log TVL, age, chains, per-category levels) reaches R² = ' + fmtNum(f.multivariate.r2) + '. The fit is weak either way — TVL and friends explain about a quarter of market cap at best — so implied values are order-of-magnitude reads, not prices.' }),
       el('h3', { text: 'Held-out test (fit on ' + f.oos_train_n + ' comps, scored on ' + f.oos_test_n + ' unseen comps)' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'fit' },
@@ -506,13 +587,21 @@
           el('tbody', null, oosRows)
         )
       ),
-      el('p', { class: 'sub', text: 'A median |log error| of 1.0 means the typical prediction is off by a factor of e (about 2.7x). The blend ties the log-log curve out of sample and beats a single global multiple; nothing here is claimed to be precise.' }),
+      el('p', { class: 'sub', text: 'A median |log error| of 1.0 means the typical prediction is off by a factor of e (about 2.7x). On this one split the blend still wins on median error while the ensemble wins on mean error and out-of-sample R²; the ensemble\u2019s claim rests on the 5-fold average below, not on this split alone. Nothing here is claimed to be precise.' }),
+      el('h3', { text: '5-fold cross-validation (each fold 25-26 unseen comps)' }),
+      el('div', { class: 'table-wrap' },
+        el('table', { class: 'fit' },
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Predictor' }), el('th', { scope: 'col', text: 'Mean of fold medians' }), el('th', { scope: 'col', text: 'Fold medians' }))),
+          el('tbody', null, cvRows)
+        )
+      ),
+      el('p', { class: 'sub', text: 'One held-out split of 26 comps is noisy — fold medians swing by half a log point — so the ensemble is judged on this average across all five folds, where it beats the blend and every single estimator. A reader who trusts only the single split can read the table above it instead.' }),
       el('h3', { text: 'Token odds (separate column, not multiplied into implied value)' }),
       el('p', { class: 'sub', text: 'Logistic regression on all ' + DATA.census.total + ' protocols: outcome "records a token" (a gecko id, symbol or market cap on record). logit = ' + fmtNum(o.intercept) + ' + ' + fmtNum(o.per_log10_tvl) + ' x log10(TVL) + ' + fmtNum(o.per_age_year) + ' x age in years. AUC ' + fmtNum(o.auc) + ' (base rate ' + Math.round(o.base_rate * 100) + '%). In the snapshot, ' + Math.round(o.young_rate * 100) + '% of protocols under 6 months old record a token, against ' + Math.round(o.old_rate * 100) + '% of those over 2 years old: older protocols are more likely to have one, so a pre-token protocol that has run a long time without one is the interesting case. The detail view shows implied value x odds as the odds-adjusted value.' }),
       el('div', { class: 'model-grid' },
         el('div', { class: 'model-cell' }, el('b', { text: 'Fitted, not guessed' }), 'Category multiples and the TVL curve come from the 128 traded tokens in this snapshot; the held-out test scores them on comps the fit never saw.'),
         el('div', { class: 'model-cell' }, el('b', { text: 'Growth and age' }), 'Seven-day TVL growth and the time a protocol has run with no token on record both lift its value; an unlisted age counts as 365 days.'),
-        el('div', { class: 'model-cell' }, el('b', { text: 'Farm verdicts' }), 'Every farm plan ends Farm, Thin or Skip: implied value of $25M or more farms, $5M-$25M is thin, under $5M skips, downgraded a step when the plan burns over $50 of gas. Capital is locked, not spent.')
+        el('div', { class: 'model-cell' }, el('b', { text: 'Farm verdicts' }), 'Every farm plan ends Farm, Thin, Watch or Skip, judged on the odds-adjusted value (implied x token odds): $10M or more farms, $2M-$10M is thin, $0.5M-$2M is watch, under $0.5M skips, downgraded a step when the plan burns over $50 of gas. Capital is locked, not spent.')
       ),
       el('p', { class: 'sub', text: 'The board says a protocol records no token, never that it has none: DefiLlama may not carry a token a protocol already has. Gas allowances in the farm plans (Ethereum about $8 a transaction, big L2s about $0.50, Solana about $0.01) are the plan\u2019s own stated allowances, not a live quote.' })
     );
@@ -547,7 +636,9 @@
         el('div', null, el('span', { text: 'Category multiple (fitted)' }), el('b', { class: 'num', text: fmtMult(calc.multiple) })),
         el('div', null, el('span', { text: 'Category estimate (TVL x multiple)' }), el('b', { class: 'num', text: fmtUsd(calc.categoryUsd) })),
         el('div', null, el('span', { text: 'Log-log curve estimate' }), el('b', { class: 'num', text: fmtUsd(calc.curveUsd) })),
-        el('div', null, el('span', { text: 'Blended base' }), el('b', { class: 'num', text: fmtUsd(calc.baseUsd) })),
+        el('div', null, el('span', { text: 'Blend (category + curve)' }), el('b', { class: 'num', text: fmtUsd(calc.blendUsd) })),
+        el('div', null, el('span', { text: 'Multivariate leg (size, age, chains, category)' }), el('b', { class: 'num', text: fmtUsd(calc.olsUsd) })),
+        el('div', null, el('span', { text: 'Ensemble base (2/3 blend + 1/3 multivariate)' }), el('b', { class: 'num', text: fmtUsd(calc.baseUsd) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: fmtMult(calc.growthMult) })),
         el('div', null, el('span', { text: 'Age multiplier' }), el('b', { class: 'num', text: fmtMult(calc.ageMult) })),
         el('div', null, el('span', { text: 'Chains multiplier' }), el('b', { class: 'num', text: fmtMult(calc.chainMult) })),

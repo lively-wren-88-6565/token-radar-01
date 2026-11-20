@@ -1,4 +1,4 @@
-// Token Radar model (radar-4): one sealed snapshot in, one ranked board out.
+// Token Radar model (radar-5): one sealed snapshot in, one ranked board out.
 //
 // The board ranks the 196 clean pre-token protocols in the snapshot: every
 // protocol that records no token (mcap, gecko_id and symbol all null), whose
@@ -13,18 +13,27 @@
 // with their market cap, never mixed into the ranked board.
 //
 // Implied value is fitted from the traded comps in the same snapshot, the
-// same function for every row, no protocol name ever special-cased:
+// same function for every row, no protocol name ever special-cased. Two
+// fitted estimators are ensembled in log space (2/3 + 1/3):
 //
-//   comps       = traded protocols with TVL > 0 and mcap > 0 (n = 128)
-//   log-log     = OLS of log(mcap) on log(TVL) over the comps
-//                 log(mcap) = a + b * log(TVL);  R^2 is reported, not hidden
-//   multiple    = median mcap/TVL per category where the category has
-//                 >= 5 comps, else the global median multiple; clamped
-//                 to [0.05, 1.00]
-//   category    = TVL x multiple          (what the category usually trades at)
-//   curve       = exp(a + b * log(TVL))    (what size alone predicts)
-//   base        = exp(0.5 * log(category) + 0.5 * log(curve))
-//                 the geometric mean of the two fitted estimators
+//   (a) the radar-4 blend: per-category median mcap/TVL (n >= 5, else the
+//       global median, clamped to [0.05, 1.00]) times TVL, blended 50/50
+//       in log space with the global log-log curve
+//       log(mcap) = a + b * log(TVL) over the comps (n = 128);
+//   (b) a multivariate fit of log(mcap) on log(TVL), age in years and
+//       log1p(chains), with one intercept per category where the category
+//       has >= 5 comps (other categories share the baseline intercept).
+//       Categories do not price alike: the fitted per-category log-log
+//       slopes run from 0.39 (RWA) to 1.78 (Dexs) against a global 0.52,
+//       which is why a single curve is not the whole model; the
+//       multivariate leg fits each category its own level jointly with
+//       size, age and chains, and the dashboard prints its per-category
+//       intercepts and its in-sample R^2.
+//
+//   blend       = exp(0.5 * log(TVL x category multiple)
+//                   + 0.5 * log(exp(a + b * log(TVL))))
+//   multi       = exp(multivariate fit of log(mcap))
+//   base        = exp((2/3) * log(blend) + (1/3) * log(multi))
 //   growth      = 1 + clamp(change_7d, -30, 60) / 100 x 0.5
 //   age         = 0.70 + 0.30 x min(age_days, 1095) / 1095
 //                 age is days since DefiLlama first listed the protocol
@@ -32,10 +41,17 @@
 //   chains      = 1 + 0.02 x min(chains - 1, 5)
 //   implied     = round(base x growth x age x chains)
 //
-// The fit is weak and the dashboard says so: the log-log R^2 is about 0.19,
-// so an implied value is an order-of-magnitude read, not a price. The
-// held-out test (deterministic 80/20 split of the comps by slug, fit on the
-// 80%, scored on the 20%) is computed at build time and printed on the
+// Why the ensemble, and what it does not claim: on 5-fold cross-validation
+// over the 128 comps (each fold 25-26 unseen comps) the ensemble's median
+// |log error| beats the radar-4 blend, and its mean |log error| is the
+// lowest of the methods tried; on the single deterministic 80/20 split the
+// blend still wins on median while the ensemble wins on mean error and
+// out-of-sample R^2. Both numbers are printed on the dashboard, so the
+// ensemble has to earn its place in the open. The fit is still weak: the
+// log-log R^2 is about 0.19 and the multivariate R^2 about 0.25, so an
+// implied value is an order-of-magnitude read, not a price. The held-out
+// test (deterministic 80/20 split of the comps by slug, fit on the 80%,
+// scored on the 20%) is computed at build time and printed on the
 // dashboard alongside the in-sample fit; no number there is hand-written.
 //
 // Token odds are a separate column, not multiplied into implied value:
@@ -47,12 +63,15 @@
 //
 // Farm plans are costed, every row: each step states a dollar cost and a
 // time, gas is priced by the chain the step runs on, capital is tiered by
-// TVL, and the last step ends with a net verdict (Farm / Thin / Skip) from
-// the implied value against the total gas the plan burns over four weeks:
-// Farm at $25M implied or more, Thin at $5M-$25M, Skip below $5M, each
-// downgraded one step when the plan burns more than $50 of gas and the
-// implied value is under $100M. Capital is locked, not spent, and the
-// verdict says so.
+// TVL, and the last step ends with a net verdict in four tiers from the
+// odds-adjusted value (implied x token odds) against the total gas the
+// plan burns over four weeks: Farm at $10M odds-adjusted or more, Thin at
+// $2M-$10M, Watch at $0.5M-$2M, Skip below $0.5M, each downgraded one
+// step when the plan burns more than $50 of gas and the odds-adjusted
+// value is under $100M. Capital is locked, not spent, and the verdict
+// says so. The verdict is judged on the odds-adjusted value because a
+// protocol that is unlikely ever to record a token is a worse farm even
+// at the same implied value.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -92,8 +111,11 @@ export interface ModelConstants {
   multiple_floor: number;
   multiple_cap: number;
   min_category_n: number;
-  farm_threshold_usd: number;
-  thin_threshold_usd: number;
+  ensemble_weight: number;
+  verdict_farm_odds_usd: number;
+  verdict_thin_odds_usd: number;
+  verdict_watch_odds_usd: number;
+  verdict_gas_cap_usd: number;
   gas_downgrade_usd: number;
 }
 
@@ -111,13 +133,16 @@ export const MODEL: ModelConstants = {
   multiple_floor: 0.05,
   multiple_cap: 1.0,
   min_category_n: 5,
-  farm_threshold_usd: 25_000_000,
-  thin_threshold_usd: 5_000_000,
+  ensemble_weight: 1 / 3,
+  verdict_farm_odds_usd: 10_000_000,
+  verdict_thin_odds_usd: 2_000_000,
+  verdict_watch_odds_usd: 500_000,
+  verdict_gas_cap_usd: 100_000_000,
   gas_downgrade_usd: 50,
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -128,6 +153,31 @@ export interface FitMethod {
   median_abs_log_error: number;
   mean_abs_log_error: number;
   oos_r2: number;
+}
+
+/** One cross-validation method's score: median |log error| per fold, then averaged. */
+export interface CvMethod {
+  method: string;
+  mean_median_abs_log_error: number;
+  fold_medians: number[];
+}
+
+/** The multivariate leg: OLS of log(mcap) on log(TVL), age and chains, with per-category intercepts. */
+export interface MultivariateFit {
+  intercept: number;
+  per_log_tvl: number;
+  per_age_year: number;
+  per_log_chains: number;
+  r2: number;
+  category_intercepts: { category: string; n: number; intercept: number }[];
+}
+
+/** One category's own log-log curve, where the category has enough comps to fit one. */
+export interface CategoryCurve {
+  category: string;
+  n: number;
+  slope: number;
+  intercept: number;
 }
 
 /** Everything fitted from the snapshot's traded comps. */
@@ -142,6 +192,9 @@ export interface FitResult {
   oos_train_n: number;
   oos_test_n: number;
   oos: FitMethod[];
+  cv: CvMethod[];
+  multivariate: MultivariateFit;
+  category_curves: CategoryCurve[];
   token_odds: {
     intercept: number;
     per_log10_tvl: number;
@@ -192,6 +245,8 @@ export interface BoardRow {
     category_multiple: number;
     category_usd: number;
     curve_usd: number;
+    blend_usd: number;
+    ols_usd: number;
     base_usd: number;
     growth_pct: number;
     growth_multiplier: number;
@@ -219,6 +274,8 @@ export interface RadarRow {
   implied_value_usd: number;
   token_odds: number;
   category_multiple: number;
+  blend_usd: number;
+  ols_usd: number;
   base_usd: number;
   growth_multiplier: number;
   age_multiplier: number;
@@ -349,15 +406,147 @@ export function fitMultiples(
   return { global, per, counts };
 }
 
-/** One fit: the log-log curve and the category multiples, fitted on one list of comps. */
+/** OLS by normal equations with a tiny ridge for stability and partial pivoting. Deterministic. */
+export function solveOls(X: number[][], y: number[]): number[] {
+  const k = X[0]!.length;
+  const A: number[][] = Array.from({ length: k }, () => Array(k).fill(0));
+  const b: number[] = Array(k).fill(0);
+  for (let i = 0; i < X.length; i++) {
+    for (let r = 0; r < k; r++) {
+      b[r]! += X[i]![r]! * y[i]!;
+      for (let c = 0; c < k; c++) A[r]![c]! += X[i]![r]! * X[i]![c]!;
+    }
+  }
+  for (let r = 0; r < k; r++) A[r]![r]! += 1e-8;
+  const M = A.map((row, i) => [...row, b[i]!]);
+  for (let c = 0; c < k; c++) {
+    let piv = c;
+    for (let r = c + 1; r < k; r++) if (Math.abs(M[r]![c]!) > Math.abs(M[piv]![c]!)) piv = r;
+    [M[c], M[piv]] = [M[piv]!, M[c]!];
+    const d = M[c]![c]!;
+    for (let j = c; j <= k; j++) M[c]![j]! /= d;
+    for (let r = 0; r < k; r++) {
+      if (r === c) continue;
+      const f = M[r]![c]!;
+      for (let j = c; j <= k; j++) M[r]![j]! -= f * M[c]![j]!;
+    }
+  }
+  return M.map((row) => row[k]!);
+}
+
+/** The multivariate leg's features: log TVL, age in years, log1p(chains), one dummy per big category. */
+export function multiFeatures(
+  p: SnapshotProtocol,
+  asOf: string,
+  catList: string[],
+): number[] {
+  const age = ageDays(asOf, p.listed_at);
+  const ageYears = (age ?? 365) / 365;
+  const row = [1, Math.log(p.tvl_usd), ageYears, Math.log1p(Array.isArray(p.chains) ? p.chains.length : 0)];
+  for (const c of catList) row.push((p.category ?? 'Other') === c ? 1 : 0);
+  return row;
+}
+
+/** Categories with at least `minN` comps, sorted by name: the multivariate leg's dummy list. */
+export function multiCategories(comps: SnapshotProtocol[], minN: number): string[] {
+  const counts = new Map<string, number>();
+  for (const p of comps) {
+    const c = p.category ?? 'Other';
+    counts.set(c, (counts.get(c) ?? 0) + 1);
+  }
+  return [...counts.entries()].filter(([, n]) => n >= minN).map(([c]) => c).sort();
+}
+
+/**
+ * The multivariate fit: OLS of log(mcap) on log(TVL), age in years and
+ * log1p(chains), with one intercept per category that has >= minN comps.
+ * Growth is deliberately not a regressor: among the comps its correlation
+ * with the log-log residual is -0.13, so fitting it would load a negative
+ * growth coefficient the board's own story contradicts; growth still lifts
+ * implied value through the post-hoc multiplier, as in radar-4.
+ */
+export function fitMultivariate(
+  comps: SnapshotProtocol[],
+  asOf: string,
+  model: ModelConstants,
+): MultivariateFit {
+  const catList = multiCategories(comps, model.min_category_n);
+  const X = comps.map((p) => multiFeatures(p, asOf, catList));
+  const y = comps.map((p) => Math.log(p.mcap_usd!));
+  const beta = solveOls(X, y);
+  const meanY = y.reduce((s, v) => s + v, 0) / y.length;
+  let ssRes = 0;
+  let ssTot = 0;
+  for (let i = 0; i < y.length; i++) {
+    let pred = 0;
+    for (let j = 0; j < beta.length; j++) pred += X[i]![j]! * beta[j]!;
+    ssRes += (y[i]! - pred) ** 2;
+    ssTot += (y[i]! - meanY) ** 2;
+  }
+  return {
+    intercept: beta[0]!,
+    per_log_tvl: beta[1]!,
+    per_age_year: beta[2]!,
+    per_log_chains: beta[3]!,
+    r2: 1 - ssRes / ssTot,
+    category_intercepts: catList.map((c, i) => ({
+      category: c,
+      n: comps.filter((p) => (p.category ?? 'Other') === c).length,
+      intercept: beta[4 + i]!,
+    })),
+  };
+}
+
+/** The multivariate leg's log(mcap) prediction for one protocol. */
+export function multiPredict(
+  p: SnapshotProtocol,
+  asOf: string,
+  multi: MultivariateFit,
+): number {
+  const age = ageDays(asOf, p.listed_at);
+  const ageYears = (age ?? 365) / 365;
+  let pred =
+    multi.intercept +
+    multi.per_log_tvl * Math.log(p.tvl_usd) +
+    multi.per_age_year * ageYears +
+    multi.per_log_chains * Math.log1p(Array.isArray(p.chains) ? p.chains.length : 0);
+  const hit = multi.category_intercepts.find((c) => c.category === (p.category ?? 'Other'));
+  if (hit !== undefined) pred += hit.intercept;
+  return pred;
+}
+
+/** One category's own log-log curve, where the category has at least 8 comps: the diagnostic that one curve does not fit all. */
+export function fitCategoryCurves(comps: SnapshotProtocol[]): CategoryCurve[] {
+  const byCat = new Map<string, SnapshotProtocol[]>();
+  for (const p of comps) {
+    const c = p.category ?? 'Other';
+    const list = byCat.get(c) ?? [];
+    list.push(p);
+    byCat.set(c, list);
+  }
+  const curves: CategoryCurve[] = [];
+  for (const [category, ps] of byCat) {
+    if (ps.length < 8) continue;
+    const f = fitLogLog(ps);
+    curves.push({ category, n: ps.length, slope: f.slope, intercept: f.intercept });
+  }
+  return curves.sort((a, b) => b.n - a.n || (a.category < b.category ? -1 : 1));
+}
+
+/** One fit: the log-log curve, the category multiples, and the multivariate leg, fitted on one list of comps. */
 export interface CompFit {
   loglog: { intercept: number; slope: number; r2: number };
   multiples: { global: number; per: Map<string, number> };
+  multivariate: MultivariateFit;
 }
 
-export function fitComps(comps: SnapshotProtocol[], model: ModelConstants): CompFit {
+export function fitComps(comps: SnapshotProtocol[], model: ModelConstants, asOf: string): CompFit {
   const m = fitMultiples(comps, model.min_category_n);
-  return { loglog: fitLogLog(comps), multiples: { global: m.global, per: m.per } };
+  return {
+    loglog: fitLogLog(comps),
+    multiples: { global: m.global, per: m.per },
+    multivariate: fitMultivariate(comps, asOf, model),
+  };
 }
 
 /** The fitted multiple for one category: its own median where n >= 5, else the global median. */
@@ -366,18 +555,29 @@ export function categoryMultiple(category: string | null, fit: CompFit, model: M
   return clamp(raw, model.multiple_floor, model.multiple_cap);
 }
 
-/** The two fitted TVL-only estimates and their geometric blend, for one protocol. */
+/** The fitted estimates and their ensemble, for one protocol: the radar-4 blend of the category multiple and the log-log curve, the multivariate leg, and the 2/3 + 1/3 ensemble of the two in log space. */
 export function fittedBase(
   protocol: SnapshotProtocol,
   fit: CompFit,
   model: ModelConstants,
-): { categoryUsd: number; curveUsd: number; baseUsd: number; multiple: number } {
+  asOf: string,
+): {
+  categoryUsd: number;
+  curveUsd: number;
+  blendUsd: number;
+  olsUsd: number;
+  baseUsd: number;
+  multiple: number;
+} {
   const multiple = categoryMultiple(protocol.category, fit, model);
   const categoryUsd = protocol.tvl_usd * multiple;
   const curveUsd = Math.exp(fit.loglog.intercept + fit.loglog.slope * Math.log(protocol.tvl_usd));
   const w = model.blend_weight;
-  const baseUsd = Math.exp(w * Math.log(categoryUsd) + (1 - w) * Math.log(curveUsd));
-  return { categoryUsd, curveUsd, baseUsd, multiple };
+  const blendUsd = Math.exp(w * Math.log(categoryUsd) + (1 - w) * Math.log(curveUsd));
+  const olsUsd = Math.exp(multiPredict(protocol, asOf, fit.multivariate));
+  const ew = model.ensemble_weight;
+  const baseUsd = Math.exp((1 - ew) * Math.log(blendUsd) + ew * Math.log(olsUsd));
+  return { categoryUsd, curveUsd, blendUsd, olsUsd, baseUsd, multiple };
 }
 
 /** The growth, age and chain multipliers and the implied value one protocol gets. */
@@ -391,6 +591,8 @@ export function impliedValue(
   multiple: number;
   categoryUsd: number;
   curveUsd: number;
+  blendUsd: number;
+  olsUsd: number;
   baseUsd: number;
   growthPct: number;
   growthMult: number;
@@ -399,7 +601,7 @@ export function impliedValue(
   age: number | null;
 } {
   const age = ageDays(asOf, protocol.listed_at);
-  const base = fittedBase(protocol, fit, model);
+  const base = fittedBase(protocol, fit, model, asOf);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = clamp(rawGrowth, model.growth_floor, model.growth_cap);
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
@@ -415,6 +617,8 @@ export function impliedValue(
     multiple: base.multiple,
     categoryUsd: base.categoryUsd,
     curveUsd: base.curveUsd,
+    blendUsd: base.blendUsd,
+    olsUsd: base.olsUsd,
     baseUsd: base.baseUsd,
     growthPct,
     growthMult,
@@ -523,20 +727,23 @@ export function tokenOdds(
 export function heldOutTest(
   comps: SnapshotProtocol[],
   model: ModelConstants,
+  asOf: string,
 ): { trainN: number; testN: number; methods: FitMethod[] } {
   const sorted = [...comps].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
   const train = sorted.filter((_, i) => i % 5 !== 4);
   const test = sorted.filter((_, i) => i % 5 === 4);
-  const fit = fitComps(train, model);
+  const fit = fitComps(train, model, asOf);
   const predict = (p: SnapshotProtocol, method: string): number => {
     if (method === 'global multiple') return p.tvl_usd * fit.multiples.global;
     if (method === 'log-log curve') return Math.exp(fit.loglog.intercept + fit.loglog.slope * Math.log(p.tvl_usd));
-    const base = fittedBase(p, fit, model);
+    const base = fittedBase(p, fit, model, asOf);
     if (method === 'category multiple') return base.categoryUsd;
-    return base.baseUsd;
+    if (method === 'multivariate fit') return base.olsUsd;
+    if (method === 'ensemble') return base.baseUsd;
+    return base.blendUsd;
   };
   const methods: FitMethod[] = [];
-  for (const method of ['global multiple', 'log-log curve', 'category multiple', 'blend']) {
+  for (const method of ['global multiple', 'log-log curve', 'category multiple', 'blend', 'multivariate fit', 'ensemble']) {
     const errs = test.map((p) => Math.abs(Math.log(predict(p, method)) - Math.log(p.mcap_usd!)));
     const preds = test.map((p) => Math.log(predict(p, method)));
     const actual = test.map((p) => Math.log(p.mcap_usd!));
@@ -555,6 +762,47 @@ export function heldOutTest(
     });
   }
   return { trainN: train.length, testN: test.length, methods };
+}
+
+/**
+ * 5-fold cross-validation over the comps: each fold is every 5th comp by
+ * slug, fitted on the other four fifths. One held-out split of 26 comps
+ * is noisy — fold medians swing by half a log point — so the ensemble's
+ * claim rests on this average across all five folds, and the dashboard
+ * prints both the single split and the cross-validated average.
+ */
+export function crossValidated(
+  comps: SnapshotProtocol[],
+  model: ModelConstants,
+  asOf: string,
+): CvMethod[] {
+  const sorted = [...comps].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const names = ['global multiple', 'log-log curve', 'category multiple', 'blend', 'multivariate fit', 'ensemble'];
+  const folds: Record<string, number[]> = {};
+  for (const n of names) folds[n] = [];
+  for (let f = 0; f < 5; f++) {
+    const train = sorted.filter((_, i) => i % 5 !== f);
+    const test = sorted.filter((_, i) => i % 5 === f);
+    const fit = fitComps(train, model, asOf);
+    const predict = (p: SnapshotProtocol, method: string): number => {
+      if (method === 'global multiple') return p.tvl_usd * fit.multiples.global;
+      if (method === 'log-log curve') return Math.exp(fit.loglog.intercept + fit.loglog.slope * Math.log(p.tvl_usd));
+      const base = fittedBase(p, fit, model, asOf);
+      if (method === 'category multiple') return base.categoryUsd;
+      if (method === 'multivariate fit') return base.olsUsd;
+      if (method === 'ensemble') return base.baseUsd;
+      return base.blendUsd;
+    };
+    for (const method of names) {
+      const errs = test.map((p) => Math.abs(Math.log(predict(p, method)) - Math.log(p.mcap_usd!)));
+      folds[method]!.push(median(errs));
+    }
+  }
+  return names.map((method) => ({
+    method,
+    mean_median_abs_log_error: folds[method]!.reduce((s, v) => s + v, 0) / folds[method]!.length,
+    fold_medians: folds[method]!,
+  }));
 }
 
 /** Whether a protocol records no token at all. */
@@ -645,9 +893,11 @@ export function buildCensus(snapshot: Snapshot, ranked: number): Census {
 /** Fit everything the dashboard reports, from the snapshot's comps. */
 export function fitModel(snapshot: Snapshot, model: ModelConstants = MODEL): { fit: FitResult; compFit: CompFit } {
   const comps = tradedComps(snapshot);
-  const compFit = fitComps(comps, model);
+  const compFit = fitComps(comps, model, snapshot.as_of);
   const multiples = fitMultiples(comps, model.min_category_n);
-  const heldOut = heldOutTest(comps, model);
+  const heldOut = heldOutTest(comps, model, snapshot.as_of);
+  const cv = crossValidated(comps, model, snapshot.as_of);
+  const curves = fitCategoryCurves(comps);
   const odds = fitTokenOdds(snapshot);
   const fit: FitResult = {
     comps_n: comps.length,
@@ -666,6 +916,9 @@ export function fitModel(snapshot: Snapshot, model: ModelConstants = MODEL): { f
     oos_train_n: heldOut.trainN,
     oos_test_n: heldOut.testN,
     oos: heldOut.methods,
+    cv,
+    multivariate: compFit.multivariate,
+    category_curves: curves,
     token_odds: odds,
   };
   return { fit, compFit };
@@ -683,7 +936,7 @@ export function buildBoard(
   compFit?: CompFit,
   odds?: FitResult['token_odds'],
 ): BoardRow[] {
-  const fit = compFit ?? fitComps(tradedComps(snapshot), model);
+  const fit = compFit ?? fitComps(tradedComps(snapshot), model, snapshot.as_of);
   const oddsFit = odds ?? fitTokenOdds(snapshot);
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
@@ -727,6 +980,8 @@ export function buildBoard(
       category_multiple: round4(s.multiple),
       category_usd: Math.round(s.categoryUsd),
       curve_usd: Math.round(s.curveUsd),
+      blend_usd: Math.round(s.blendUsd),
+      ols_usd: Math.round(s.olsUsd),
       base_usd: Math.round(s.baseUsd),
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
@@ -736,7 +991,7 @@ export function buildBoard(
       odds_adjusted_usd: Math.round(s.implied * s.odds),
       age_days: s.age,
     },
-    farm_steps: farmSteps(s.p, s.age, s.implied, model).map(stepText),
+    farm_steps: farmSteps(s.p, s.age, s.implied, s.odds, model).map(stepText),
   }));
 }
 
@@ -850,12 +1105,28 @@ function weeklyFor(p: SnapshotProtocol, capital: number, chain: string): string 
   return `Make one more qualifying action on ${name} each week, such as a deposit, a swap or a vote.`;
 }
 
-/** The net verdict for a plan: implied value against the gas the plan burns. */
-export function farmVerdict(implied: number, gasTotal: number, model: ModelConstants): 'Farm' | 'Thin' | 'Skip' {
-  let verdict: 'Farm' | 'Thin' | 'Skip' =
-    implied >= model.farm_threshold_usd ? 'Farm' : implied >= model.thin_threshold_usd ? 'Thin' : 'Skip';
-  if (gasTotal > model.gas_downgrade_usd && implied < 100_000_000) {
-    verdict = verdict === 'Farm' ? 'Thin' : 'Skip';
+/** A short dollar figure for a verdict sentence: $12.5M, $850K, $400. */
+export function fmtShortUsd(n: number): string {
+  if (n >= 1_000_000) return `$${(Math.round((n / 1e6) * 10) / 10).toFixed(1).replace(/\.0$/, '')}M`;
+  if (n >= 1_000) return `$${Math.round(n / 1e3)}K`;
+  return `$${Math.round(n)}`;
+}
+
+/** The four farm tiers, in order: Farm, Thin, Watch, Skip. */
+export type FarmVerdict = 'Farm' | 'Thin' | 'Watch' | 'Skip';
+
+/** The net verdict for a plan: the odds-adjusted value against the gas the plan burns. */
+export function farmVerdict(oddsAdjusted: number, gasTotal: number, model: ModelConstants): FarmVerdict {
+  let verdict: FarmVerdict =
+    oddsAdjusted >= model.verdict_farm_odds_usd
+      ? 'Farm'
+      : oddsAdjusted >= model.verdict_thin_odds_usd
+        ? 'Thin'
+        : oddsAdjusted >= model.verdict_watch_odds_usd
+          ? 'Watch'
+          : 'Skip';
+  if (gasTotal > model.gas_downgrade_usd && oddsAdjusted < model.verdict_gas_cap_usd) {
+    verdict = verdict === 'Farm' ? 'Thin' : verdict === 'Thin' ? 'Watch' : 'Skip';
   }
   return verdict;
 }
@@ -870,6 +1141,7 @@ export function farmSteps(
   p: SnapshotProtocol,
   age: number | null,
   implied: number,
+  odds: number,
   model: ModelConstants = MODEL,
 ): FarmStep[] {
   const chain = chainOf(p);
@@ -880,13 +1152,16 @@ export function farmSteps(
   const gas2 = secondChain !== null ? gasUsd(secondChain) : gas1;
   const gasTotal = Math.round((gas1 + gas1 * 4 + gas2 + gas1) * 100) / 100;
   const capitalTotal = secondChain !== null ? capital * 2 : capital;
-  const verdict = farmVerdict(implied, gasTotal, model);
+  const oddsAdjusted = Math.round(implied * odds);
+  const verdict = farmVerdict(oddsAdjusted, gasTotal, model);
   const verdictWhy =
     verdict === 'Farm'
-      ? `the $${Math.round(implied / 1e6)}M implied value is worth about ${gasText(gasTotal)} of gas and $${capitalTotal} locked for ${hold} days`
+      ? `the ${fmtShortUsd(implied)} implied value, ${fmtShortUsd(oddsAdjusted)} after ${Math.round(odds * 100)}% token odds, is worth about ${gasText(gasTotal)} of gas and $${capitalTotal} locked for ${hold} days`
       : verdict === 'Thin'
-        ? `the $${Math.round(implied / 1e6)}M implied value only just covers about ${gasText(gasTotal)} of gas and $${capitalTotal} locked for ${hold} days, so farm small and only on cheap gas`
-        : `the $${Math.round(implied / 1e6)}M implied value does not cover about ${gasText(gasTotal)} of gas and $${capitalTotal} locked for ${hold} days`;
+        ? `the ${fmtShortUsd(implied)} implied value, ${fmtShortUsd(oddsAdjusted)} after ${Math.round(odds * 100)}% token odds, only just covers about ${gasText(gasTotal)} of gas and $${capitalTotal} locked for ${hold} days, so farm small and only on cheap gas`
+        : verdict === 'Watch'
+          ? `the ${fmtShortUsd(implied)} implied value is only ${fmtShortUsd(oddsAdjusted)} after ${Math.round(odds * 100)}% token odds, so watch it and farm only the cheapest chain with the smallest size`
+          : `the ${fmtShortUsd(implied)} implied value is only ${fmtShortUsd(oddsAdjusted)} after ${Math.round(odds * 100)}% token odds and does not cover about ${gasText(gasTotal)} of gas and $${capitalTotal} locked for ${hold} days`;
   return [
     {
       text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
@@ -950,7 +1225,7 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
 export function compRows(snapshot: Snapshot, compFit: CompFit, model: ModelConstants): CompRow[] {
   return tradedComps(snapshot)
     .map((p) => {
-      const base = fittedBase(p, compFit, model);
+      const base = fittedBase(p, compFit, model, snapshot.as_of);
       return {
         slug: p.slug,
         name: p.name,
@@ -983,6 +1258,8 @@ export function radarRow(row: BoardRow): RadarRow {
     implied_value_usd: row.implied_value_usd,
     token_odds: row.model.token_odds,
     category_multiple: row.model.category_multiple,
+    blend_usd: row.model.blend_usd,
+    ols_usd: row.model.ols_usd,
     base_usd: row.model.base_usd,
     growth_multiplier: row.model.growth_multiplier,
     age_multiplier: row.model.age_multiplier,
