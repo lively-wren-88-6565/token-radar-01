@@ -1,10 +1,17 @@
 // Token Radar (radar-4): the entrypoint the grader runs.
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
-// scores every rankable pre-token protocol with the model in lib/model.ts,
+// scores every clean pre-token protocol with the fitted model in lib/model.ts,
 // writes the ranked board to /output/board.json, writes the dashboard's data
 // beside the page as data.js, copies dashboard/ and screenshots/ to /output,
 // and writes /output/dossier.json with the vendored make.fun library.
+//
+// The model is fitted at build time from the snapshot's own traded comps:
+// per-category median mcap/TVL blended with a log-log TVL curve, then
+// growth, no-token age and chain factors; token odds come from a logistic
+// regression on all 758 protocols. The run prints the fit, the held-out
+// test, the 758-protocol census and the farm verdicts, so a run's own log
+// says what the model claims and how well it held up.
 //
 // The run is deterministic: the same snapshot bytes always write the same
 // output bytes. No network, no clock, no randomness.
@@ -84,7 +91,19 @@ for (const name of shots) {
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
 
+/** The run's own log: the fit, the held-out test, the census and the verdicts. */
+const blend = radar.fit.oos.find((m) => m.method === 'blend');
+const verdicts = { Farm: 0, Thin: 0, Skip: 0 };
+for (const row of board) {
+  const last = row.farm_steps[row.farm_steps.length - 1]!;
+  const m = last.match(/Verdict: (Farm|Thin|Skip)/);
+  if (m !== null) verdicts[m[1] as 'Farm' | 'Thin' | 'Skip']++;
+}
+
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+    `token radar: fit on ${radar.fit.comps_n} traded comps, log-log R² ${radar.fit.loglog_r2.toFixed(3)}, held-out blend median |log error| ${blend === undefined ? 'n/a' : blend.median_abs_log_error.toFixed(3)} on ${radar.fit.oos_test_n} unseen comps\n` +
+    `token radar: census ${radar.census.total} = ${radar.census.ranked} ranked + ${radar.census.traded_mcap} traded + ${radar.census.token_recorded_no_mcap} token recorded without mcap + ${radar.census.pretoken_excluded} pre-token excluded\n` +
+    `token radar: farm verdicts ${verdicts.Farm} Farm, ${verdicts.Thin} Thin, ${verdicts.Skip} Skip\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashboardFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
