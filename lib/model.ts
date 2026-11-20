@@ -1,9 +1,10 @@
-// Token Radar model (radar-2): one sealed snapshot in, one ranked board out.
+// Token Radar model (radar-3): one sealed snapshot in, one ranked board out.
 //
 // The board ranks every rankable pre-token protocol in the snapshot: the 40
 // watchlist slugs (the floor, never the ceiling) plus every other pre-token
-// protocol below the floor that is not an exchange product and not a versioned
-// pool. Live-token protocols are kept apart and shown with their market cap,
+// protocol below the floor that is not an exchange product, not a versioned
+// pool, and not a wrapped, staked or bridged product of a token that already
+// trades. Live-token protocols are kept apart and shown with their market cap,
 // never mixed into the ranked board.
 //
 // Implied value is one function of the snapshot's own figures, the same
@@ -94,7 +95,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -276,9 +277,38 @@ export function isPreToken(p: SnapshotProtocol): boolean {
   return p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
 }
 
-/** Whether a protocol is one the board may rank: pre-token, not an exchange, not a versioned pool. */
+/**
+ * Categories that are a wrapped, staked or bridged product of a token that
+ * already trades, not a protocol of their own: the brief ranks only protocols
+ * that are not such a product. The watchlist floor in buildBoard is untouched:
+ * every watchlist slug is ranked even if its category is listed here
+ * (Saturn, a Stablecoin Wrapper, and Reti Pooling, a Staking Pool, stay in).
+ */
+const WRAPPED_CATEGORIES = new Set([
+  'Bridge',
+  'Canonical Bridge',
+  'Cross Chain Bridge',
+  'Liquid Staking',
+  'Liquid Restaking',
+  'Staking Pool',
+  'Anchor BTC',
+  'Decentralized BTC',
+  'Restaked BTC',
+  'Stablecoin Wrapper',
+  'Dual-Token Stablecoin',
+]);
+
+/** A name that says the product is a staked, wrapped or bridged version of something else. */
+const WRAPPED_NAME = /\b(staked|wrapped|bridge)\b/i;
+
+/** Whether a protocol is a wrapped, staked or bridged product of another token. */
+export function isWrappedProduct(p: SnapshotProtocol): boolean {
+  return (p.category !== null && WRAPPED_CATEGORIES.has(p.category)) || WRAPPED_NAME.test(p.name);
+}
+
+/** Whether a protocol is one the board may rank: pre-token, not an exchange, not a versioned pool, not a wrapped/staked/bridged product. */
 export function isRankable(p: SnapshotProtocol): boolean {
-  return isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name);
+  return isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name) && !isWrappedProduct(p);
 }
 
 /** The snapshot's protocol by slug. */

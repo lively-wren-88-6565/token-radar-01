@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/token-radar-01/lively-wren-88-6565/token-radar-01/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/lively-wren-88-6565/token-radar-01/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
-A radar of pre-token protocols from the DefiLlama protocol index (snapshot 2026-11-14), ranked by one model of TVL, 7-day growth, age, chains and category: 289 rows, all 40 watchlist protocols covered, each with a farm plan. The live-token protocols are set aside with their market caps shown, never mixed into the ranking. Implied value is a model, not a price and not a prediction of a launch.
+A radar of pre-token protocols from the DefiLlama protocol index (snapshot 2026-11-14), ranked by one model of TVL, 7-day growth, age, chains and category: 190 rows, all 40 watchlist protocols covered, wrapped/staked/bridged products excluded, each with a farm plan. The live-token protocols are set aside with their market caps shown, never mixed into the ranking. Implied value is a model, not a price and not a prediction of a launch.
 
 ## Run it
 
