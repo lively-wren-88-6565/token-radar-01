@@ -125,3 +125,15 @@ table.fit td:first-child { white-space: normal; }
   .count { margin-left: 0; }
   .fsteps { grid-template-columns: repeat(2, 1fr); }
 }
+.ledger { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; margin: 16px 0 4px; }
+.ledger h2 { margin: 0 0 8px; font-size: 16px; }
+.lbar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--panel2); }
+.lbar i { display: block; height: 100%; }
+.lbar i:nth-child(1) { background: var(--accent); }
+.lbar i:nth-child(2) { background: #7fb069; }
+.lbar i:nth-child(3) { background: #e0a458; }
+.lbar i:nth-child(4) { background: #8a8f98; }
+.scatter svg { width: 100%; max-width: 560px; height: auto; display: block; }
+.scatter svg circle { fill: var(--accent); }
+.scatter svg .diag { stroke: var(--text); stroke-width: 1.5; }
+.scatter svg .band { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 3; }

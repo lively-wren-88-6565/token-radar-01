@@ -1,4 +1,4 @@
-// Token Radar (radar-6): the entrypoint the grader runs.
+// Token Radar (radar-7): the entrypoint the grader runs.
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
 // scores every clean pre-token protocol with the fitted model in lib/model.ts,
@@ -8,9 +8,11 @@
 //
 // The model is fitted at build time from the snapshot's own traded comps:
 // a Theil-Sen log-log TVL curve over cleaned comps (one per ticker, house
-// categories and receipt tokens out), plus a shrunken sector effect, with
-// growth and age kept only if the blind-test ladder (leave-one-out and
-// old-to-new walk-forward) says they lower the miss on both tests; token
+// categories and receipt tokens out), plus a shrunken sector effect,
+// blended in log space with a v4-style ensemble (category multiple x
+// log-log curve, blended with a multivariate OLS), with the blend weight
+// and the compressed growth/age terms picked by grid search on the
+// blind-test ladder (leave-one-out and old-to-new walk-forward); token
 // odds come from a logistic regression on all 758 protocols. The run
 // prints the fit, the ladder, the interval hit rates, the 758-protocol
 // census and the farm verdicts, so a run's own log says what the model
@@ -26,7 +28,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { boardIssue, buildRadar, dataScript, farmEcon, parseSnapshot, MODEL } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -97,26 +99,41 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 /** The run's own log: the fit, the ladder, the intervals, the census and the verdicts. */
 const fit = radar.fit;
-const verdicts = { Farm: 0, Thin: 0, Watch: 0, Skip: 0 };
+const verdicts = { Farm: 0, Thin: 0, Skip: 0 };
 for (const row of board) {
   const last = row.farm_steps[row.farm_steps.length - 1]!;
-  const m = last.match(/Verdict: (Farm|Thin|Watch|Skip)/);
-  if (m !== null) verdicts[m[1] as 'Farm' | 'Thin' | 'Watch' | 'Skip']++;
+  const m = last.match(/Verdict: (Farm|Thin|Skip)/);
+  if (m !== null) verdicts[m[1] as 'Farm' | 'Thin' | 'Skip']++;
 }
 const ladderLine = fit.ladder
   .map((l) => `${l.level} LOO x${l.loo_miss_x} / WF x${l.wf_miss_x}${l.kept ? ' kept' : ' dropped'}`)
   .join('; ');
 const iv = fit.intervals;
+const ch = fit.chosen;
+const slices: number[] = [];
+const gases: number[] = [];
+for (const r of board) {
+  const p = snapshot.protocols.find((x) => x.slug === r.slug)!;
+  const e = farmEcon(p, r.age_days, r.implied_value_usd, MODEL);
+  slices.push(e.slice_usd);
+  gases.push(e.gas_total);
+}
+slices.sort((a, b) => a - b);
+gases.sort((a, b) => a - b);
+const medSlice = slices[Math.floor(slices.length / 2)]!;
+const medGas = gases[Math.floor(gases.length / 2)]!;
 
 process.stdout.write(
-  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside, ${radar.set_aside.length} set aside with demoted values)\n` +
     `token radar: comps cleaned ${fit.traded_n} traded -> ${fit.comps_n} (${fit.house_excluded} house, ${fit.receipt_excluded} receipt, ${fit.families_merged} family merges)\n` +
     `token radar: Theil-Sen log(mcap) = ${fit.curve.intercept} + ${fit.curve.slope} x log(TVL), R2 ${fit.curve.r2}, final ${fit.final_level} R2 ${fit.curve.final_r2}\n` +
+    `token radar: blend w=${ch.blend_weight} (Theil-Sen vs ensemble), growth clamp +- ${ch.growth_clamp}${ch.growth_clamp_tied ? ' (grid-tied, sudhan 0.4)' : ''}, age shrink ${ch.age_shrink}, age slope ${ch.age_slope_log_per_year} log/yr, mean age ${ch.mean_age_years}y\n` +
     `token radar: ladder ${ladderLine}\n` +
+    `token radar: two-way check: Theil-Sen vs ensemble within 3x on ${fit.twoway.within3}/${fit.twoway.n} comps, within 2x on ${fit.twoway.within2}/${fit.twoway.n}\n` +
     `token radar: intervals P25-P75 young x${iv.young_lo_factor}-x${iv.young_hi_factor} old x${iv.old_lo_factor}-x${iv.old_hi_factor}; LOO hits ${iv.loo_hit_young}/${iv.loo_n_young} young, ${iv.loo_hit_old}/${iv.loo_n_old} old, ${iv.loo_hit_all}/${iv.loo_n_all} all; walk-forward hits ${iv.wf_hit}/${iv.wf_n}\n` +
     `token radar: 200-refit rank range median width ${fit.refits.median_rank_width}, p90 ${fit.refits.p90_rank_width}, ${fit.refits.rows_with_width_le_10}/196 rows within 10 ranks\n` +
     `token radar: top ${board[0]!.name} $${board[0]!.implied_value_usd}, total implied $${radar.total_implied_usd}; best per hour ${fit.best_per_hour.name} ${fit.best_per_hour.per_hour_usd >= 0 ? '+' : ''}$${fit.best_per_hour.per_hour_usd}/h (${fit.best_per_hour.verdict})\n` +
     `token radar: census ${radar.census.total} = ${radar.census.ranked} ranked + ${radar.census.traded_mcap} traded + ${radar.census.token_recorded_no_mcap} token recorded without mcap + ${radar.census.pretoken_excluded} pre-token excluded\n` +
-    `token radar: farm verdicts on a $1000 ticket: ${verdicts.Farm} Farm, ${verdicts.Thin} Thin, ${verdicts.Watch} Watch, ${verdicts.Skip} Skip\n` +
+    `token radar: farm verdicts on a $1000 ticket: ${verdicts.Farm} Farm, ${verdicts.Thin} Thin, ${verdicts.Skip} Skip; median slice $${medSlice}, median gas $${medGas}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashboardFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

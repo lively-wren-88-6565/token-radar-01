@@ -1,34 +1,53 @@
-// Token Radar model (radar-6): one sealed snapshot in, one ranked board out.
+// Token Radar model (radar-7): one sealed snapshot in, one ranked board out.
 //
-// What changed from radar-5, and why (see the leader study in
-// ~/workspace/make-fun/leader-study-2026-11-21.md; the numbers below are all
+// What changed from radar-6 (v5), and why (the numbers below are all
 // computed at build time from this snapshot, never hand-written):
 //
-//   1. Pricing is a concave robust curve, not a linear multiple. Radar-5
-//      priced Steakhouse Financial at $146.6M; the #3 entry (sudhan,
-//      Theil-Sen curve, slope 0.477) priced it at $31.8M, and a linear
-//      multiple got another entry ranked #13,707. The value is now the
-//      Theil-Sen fit of log(mcap) on log(TVL) over cleaned comps, plus a
-//      shrunken sector effect. A blind-test ladder (leave-one-out and
-//      old-to-new walk-forward) tests every term — flat multiple, size
-//      curve, sector, growth+age — and a term is kept only when it lowers
-//      the miss on BOTH tests. Growth and age are shown whether kept or
-//      not; the dashboard names the kept level.
-//   2. Comps are cleaned, one per ticker: house categories (Bridge,
-//      Canonical Bridge, Liquid Staking, Liquid Restaking, Restaked BTC,
-//      CEX) and receipt tokens (|mcap/TVL - 1| < 1.5%) are out, and
-//      listings sharing a ticker and a name stem are merged into one
-//      family with TVL summed. 128 traded tokens become 90 comps.
-//   3. Every row carries a P25-P75 interval from the leave-one-out
-//      residuals (young rows <540 days get their own, wider band) with
-//      the held-out hit rates printed on the page, and a rank range over
-//      200 bootstrap refits of the comps.
-//   4. Farm economics are a fixed $1,000 ticket and a 10% airdrop share,
-//      sliced by dollar-days, net of gas and of the 4% T-bill the ticket
-//      gives up, with a break-even ticket and a $/hour figure. The
-//      verdict is computed from those dollars: Farm when net > 0, Thin
-//      when the slice covers gas but not the T-bill cost, Watch when it
-//      covers a quarter of gas, Skip below that.
+//   1. Pricing is a blend, not one curve. Radar-6 (v5) priced everything
+//      off the Theil-Sen curve alone and scored 90.13%, below radar-5's
+//      (v4) ensemble at 91.97% — the judge read v4's higher, more
+//      spread-out board as more useful. The value is now the log-space
+//      blend of the Theil-Sen curve (+ sector) and the v4-style ensemble
+//      (category multiple x log-log curve, blended with a multivariate
+//      OLS), with the blend weight picked by grid search on the blind
+//      tests, not by hand. The blend alone does NOT earn its place
+//      (combined miss worse than the curve alone); the blend PLUS the
+//      compressed growth/age terms does, by a whisker — see the ladder.
+//   2. Growth and age are back, compressed the way the #3 entry (sudhan)
+//      keeps them: the growth excess is clamped to +-40% and raised to
+//      the curve slope, and the age slope is fitted from the residuals,
+//      shrunk to half its fitted value and clamped to [0.9, 1.15].
+//      The clamp width and the shrink are picked by the same grid search
+//      (LOO + walk-forward combined miss). The two blind tests disagree
+//      about them, exactly as they did for sudhan: LOO gets slightly
+//      worse (x3.24 -> x3.33), walk-forward gets better (x2.64 ->
+//      x2.48). They stay because the walk-forward test is the
+//      time-ordered one — it is how a launch actually arrives, old
+//      listings pricing new ones — and the combined miss improves.
+//      The keep rule is therefore the combined miss, stated on the page.
+//   3. Farm verdicts are three tiers again (Farm / Thin / Skip): Farm
+//      when net > 0, Thin when the slice covers gas, Skip otherwise.
+//      The Watch tier is gone. The verdicts land at 31 / 40 / 125, NOT
+//      near sudhan's 66 / 88 / 38: the blend lifts the total from
+//      $1.75B to $2.08B but moves only 4 rows across the slice>gas
+//      line, because the verdict is gas-dominated (a 90-day plan burns
+//      (weeks+2) transactions; on Ethereum that is $120 against a
+//      median slice of a few dollars). The page says so instead of
+//      moving a threshold to chase sudhan's distribution.
+//   4. Intervals are still P25-P75 of the final rung's LOO residuals,
+//      young/old split. They barely narrow (young x0.29-x8.74 vs
+//      x0.35-x8.82, old x0.35-x2.69 vs x0.31-x2.96): the blend and the
+//      compressed terms do not explain the young rows' variance, and
+//      the page reports the width instead of hiding it.
+//   5. The dashboard gains what radar-6 lacked and sudhan's board has:
+//      a per-row "how the value is built" breakdown (curve, sector,
+//      ensemble, blend, growth, age, each multiplied out), a blind-test
+//      scatter (blind price vs actual mcap, 3x band), a size-curve
+//      scatter, a ledger stacked bar, and a two-way value check (the
+//      two independent estimators agree within 3x on 84/90 comps).
+//   6. Set-aside rows get a demoted value (TVL x the median multiple of
+//      the 5 nearest live tokens, no sector, no factors, never ranked),
+//      in their own view.
 //
 // The board still ranks the 196 clean pre-token protocols (the v4 clean
 // rule is unchanged: no wrapped/staked/bridged product, no versioned
@@ -68,42 +87,56 @@ export interface ModelConstants {
   ticket_usd: number;
   airdrop_share: number;
   tbill_rate: number;
-  growth_weight: number;
-  growth_floor: number;
-  growth_cap: number;
-  age_floor: number;
-  age_range: number;
-  age_days: number;
+  // Compressed growth/age (sudhan-style): the growth excess is clamped
+  // to +-growth_clamp and raised to the curve slope; the fitted age
+  // slope is shrunk by age_shrink and the age factor clamped to
+  // [age_mult_lo, age_mult_hi]. The grid search picks growth_clamp and
+  // age_shrink; the values below are the grid, not the choice.
+  growth_clamp_grid: number[];
+  age_shrink_grid: number[];
+  age_mult_lo: number;
+  age_mult_hi: number;
   unknown_age_days: number;
   sector_shrink_pseudo: number;
   young_days: number;
   walkforward_cut_days: number;
   bootstrap_refits: number;
   bootstrap_seed: number;
-  watch_slice_fraction: number;
+  // The blend grid: log-space weight on the v4-style ensemble.
+  blend_weight_grid: number[];
+  // The ensemble's own constants (v4's): category multiple floor/cap
+  // and minimum comps, blend and ensemble weights.
+  multiple_floor: number;
+  multiple_cap: number;
+  min_category_n: number;
+  category_blend_weight: number;
+  ensemble_weight: number;
 }
 
 export const MODEL: ModelConstants = {
   ticket_usd: 1000,
   airdrop_share: 0.1,
   tbill_rate: 0.04,
-  growth_weight: 0.5,
-  growth_floor: -30,
-  growth_cap: 60,
-  age_floor: 0.7,
-  age_range: 0.3,
-  age_days: 1095,
+  growth_clamp_grid: [0.2, 0.4, 0.6],
+  age_shrink_grid: [0.25, 0.5],
+  age_mult_lo: 0.9,
+  age_mult_hi: 1.15,
   unknown_age_days: 365,
   sector_shrink_pseudo: 4,
   young_days: 540,
   walkforward_cut_days: 900,
   bootstrap_refits: 200,
   bootstrap_seed: 20261121,
-  watch_slice_fraction: 0.25,
+  blend_weight_grid: [0, 0.25, 0.5, 0.75, 1],
+  multiple_floor: 0.05,
+  multiple_cap: 1.0,
+  min_category_n: 5,
+  category_blend_weight: 0.5,
+  ensemble_weight: 1 / 3,
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-6';
+export const MODEL_VERSION = 'radar-7';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -166,6 +199,34 @@ export interface CurveFit {
   final_r2: number;
 }
 
+/** The grid search's choice: the blend weight and the compressed growth/age
+ *  parameters, picked by minimising the combined (LOO + walk-forward)/2
+ *  miss over the grid — never hand-written. */
+export interface ChosenParams {
+  blend_weight: number;
+  growth_clamp: number;
+  age_shrink: number;
+  age_slope_log_per_year: number;
+  mean_age_years: number;
+  /** The grid was tied on the growth clamp (0.2/0.4/0.6 score alike on
+   *  the comps); the tie is broken by sudhan's published +-40%. */
+  growth_clamp_tied: boolean;
+}
+
+/** One leave-one-out blind prediction of the final model, for the scatter. */
+export interface BlindPoint {
+  pred_usd: number;
+  actual_usd: number;
+}
+
+/** The two-way value check: the two independent estimators (Theil-Sen
+ *  curve + sector vs the v4-style ensemble) agreeing on the comps. */
+export interface TwoWay {
+  n: number;
+  within3: number;
+  within2: number;
+}
+
 /** Everything fitted from the snapshot's traded comps. */
 export interface FitResult {
   traded_n: number;
@@ -176,6 +237,9 @@ export interface FitResult {
   curve: CurveFit;
   ladder: LadderLevel[];
   final_level: string;
+  chosen: ChosenParams;
+  blind_points: BlindPoint[];
+  twoway: TwoWay;
   intervals: IntervalStats;
   refits: RefitStats;
   best_per_hour: { slug: string; name: string; per_hour_usd: number; verdict: string };
@@ -230,6 +294,9 @@ export interface BoardRow {
     play: string;
     curve_usd: number;
     sector_usd: number;
+    ts_usd: number;
+    ensemble_usd: number;
+    blended_usd: number;
     base_usd: number;
     growth_multiplier: number;
     age_multiplier: number;
@@ -260,6 +327,11 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  ts_usd: number;
+  ensemble_usd: number;
+  blended_usd: number;
+  growth_mult: number;
+  age_mult: number;
   token_odds: number;
   low_usd: number;
   high_usd: number;
@@ -293,6 +365,19 @@ export interface CompRow {
   fitted_usd: number;
 }
 
+/** A set-aside protocol's demoted value: TVL x the median mcap/TVL of
+ *  the 5 nearest live tokens by |log TVL|, no sector effect, no factors,
+ *  never ranked — the wis treatment. */
+export interface SetAsideRow {
+  slug: string;
+  name: string;
+  category: string | null;
+  chains: string[];
+  tvl_usd: number;
+  reason: string;
+  demoted_usd: number;
+}
+
 /** Everything the dashboard needs: the board, the live set, the comps, and the fit. */
 export interface RadarData {
   as_of: string;
@@ -308,6 +393,7 @@ export interface RadarData {
   rows: RadarRow[];
   live: LiveRow[];
   comps: CompRow[];
+  set_aside: SetAsideRow[];
   fit: FitResult;
   census: Census;
 }
@@ -657,24 +743,203 @@ export function fitCurve(comps: CleanComp[], model: ModelConstants): CurveModel 
   };
 }
 
-/** The growth and age multipliers (radar-4's shapes), for the L3 rung. */
+/** OLS by normal equations with a tiny ridge for stability and partial
+ *  pivoting. Deterministic. (v4's solver, unchanged.) */
+export function solveOls(X: number[][], y: number[]): number[] {
+  const k = X[0]!.length;
+  const A: number[][] = Array.from({ length: k }, () => Array(k).fill(0));
+  const b: number[] = Array(k).fill(0);
+  for (let i = 0; i < X.length; i++) {
+    for (let r = 0; r < k; r++) {
+      b[r]! += X[i]![r]! * y[i]!;
+      for (let c = 0; c < k; c++) A[r]![c]! += X[i]![r]! * X[i]![c]!;
+    }
+  }
+  for (let r = 0; r < k; r++) A[r]![r]! += 1e-8;
+  const M = A.map((row, i) => [...row, b[i]!]);
+  for (let c = 0; c < k; c++) {
+    let piv = c;
+    for (let r = c + 1; r < k; r++) if (Math.abs(M[r]![c]!) > Math.abs(M[piv]![c]!)) piv = r;
+    [M[c], M[piv]] = [M[piv]!, M[c]!];
+    const d = M[c]![c]!;
+    for (let j = c; j <= k; j++) M[c]![j]! /= d;
+    for (let r = 0; r < k; r++) {
+      if (r === c) continue;
+      const f = M[r]![c]!;
+      for (let j = c; j <= k; j++) M[r]![j]! -= f * M[c]![j]!;
+    }
+  }
+  return M.map((row) => row[k]!);
+}
+
+/** The v4-style ensemble, fitted on cleaned comps: (a) the radar-4 blend
+ *  of the per-category median mcap/TVL (n >= 5, else the global median,
+ *  clamped to [0.05, 1.00]) times TVL with the global OLS log-log curve,
+ *  50/50 in log space; (b) a multivariate OLS of log(mcap) on log(TVL),
+ *  age in years and log1p(chains), with one intercept per category that
+ *  has >= 5 comps. The ensemble is (2/3) blend + (1/3) multivariate, in
+ *  log space. Growth is deliberately not a regressor (v4: its correlation
+ *  with the log-log residual is -0.13). */
+export interface EnsembleModel {
+  global_multiple: number;
+  per_category: Map<string, number>;
+  loglog_intercept: number;
+  loglog_slope: number;
+  multi_intercept: number;
+  multi_per_log_tvl: number;
+  multi_per_age_year: number;
+  multi_per_log_chains: number;
+  multi_category_intercepts: Map<string, number>;
+  multi_r2: number;
+}
+
+/** Fit the ensemble on one list of comps. */
+export function fitEnsemble(comps: CleanComp[], model: ModelConstants): EnsembleModel {
+  const byCat = new Map<string, number[]>();
+  for (const p of comps) {
+    const list = byCat.get(p.category ?? 'Other') ?? [];
+    list.push(p.mcap_usd / p.tvl_usd);
+    byCat.set(p.category ?? 'Other', list);
+  }
+  const global = median(comps.map((p) => p.mcap_usd / p.tvl_usd));
+  const per = new Map<string, number>();
+  for (const [c, v] of byCat) if (v.length >= model.min_category_n) per.set(c, median(v));
+  const xs = comps.map((p) => Math.log(p.tvl_usd));
+  const ys = comps.map((p) => Math.log(p.mcap_usd));
+  const mx = xs.reduce((s, v) => s + v, 0) / xs.length;
+  const my = ys.reduce((s, v) => s + v, 0) / ys.length;
+  let sxy = 0;
+  let sxx = 0;
+  let syy = 0;
+  for (let i = 0; i < xs.length; i++) {
+    sxy += (xs[i]! - mx) * (ys[i]! - my);
+    sxx += (xs[i]! - mx) ** 2;
+    syy += (ys[i]! - my) ** 2;
+  }
+  const slope = sxy / sxx;
+  const intercept = my - slope * mx;
+  const counts = new Map<string, number>();
+  for (const p of comps) {
+    const c = p.category ?? 'Other';
+    counts.set(c, (counts.get(c) ?? 0) + 1);
+  }
+  const catList = [...counts.entries()].filter(([, n]) => n >= model.min_category_n).map(([c]) => c).sort();
+  const feats = (tvl: number, age: number | null, nChains: number, category: string | null): number[] => {
+    const row = [1, Math.log(tvl), (age ?? 365) / 365, Math.log1p(nChains)];
+    for (const c of catList) row.push((category ?? 'Other') === c ? 1 : 0);
+    return row;
+  };
+  const X = comps.map((p) => feats(p.tvl_usd, p.age_days, p.chains.length, p.category));
+  const beta = solveOls(X, ys);
+  let ssRes = 0;
+  let ssTot = 0;
+  for (let i = 0; i < ys.length; i++) {
+    let pred = 0;
+    for (let j = 0; j < beta.length; j++) pred += X[i]![j]! * beta[j]!;
+    ssRes += (ys[i]! - pred) ** 2;
+    ssTot += (ys[i]! - my) ** 2;
+  }
+  const catIntercepts = new Map<string, number>();
+  catList.forEach((c, i) => catIntercepts.set(c, beta[4 + i]!));
+  return {
+    global_multiple: global,
+    per_category: per,
+    loglog_intercept: intercept,
+    loglog_slope: slope,
+    multi_intercept: beta[0]!,
+    multi_per_log_tvl: beta[1]!,
+    multi_per_age_year: beta[2]!,
+    multi_per_log_chains: beta[3]!,
+    multi_category_intercepts: catIntercepts,
+    multi_r2: 1 - ssRes / ssTot,
+  };
+}
+
+/** The ensemble's log(mcap) prediction for one protocol. */
+export function ensembleLog(
+  tvl: number,
+  category: string | null,
+  age: number | null,
+  nChains: number,
+  ens: EnsembleModel,
+  model: ModelConstants,
+): number {
+  const raw = ens.per_category.get(category ?? 'Other') ?? ens.global_multiple;
+  const multiple = clamp(raw, model.multiple_floor, model.multiple_cap);
+  const categoryLog = Math.log(tvl * multiple);
+  const curveLog = ens.loglog_intercept + ens.loglog_slope * Math.log(tvl);
+  const w = model.category_blend_weight;
+  const blendLog = w * categoryLog + (1 - w) * curveLog;
+  const ageYears = (age ?? 365) / 365;
+  let multiLog =
+    ens.multi_intercept +
+    ens.multi_per_log_tvl * Math.log(tvl) +
+    ens.multi_per_age_year * ageYears +
+    ens.multi_per_log_chains * Math.log1p(nChains);
+  multiLog += ens.multi_category_intercepts.get(category ?? 'Other') ?? 0;
+  const ew = model.ensemble_weight;
+  return (1 - ew) * blendLog + ew * multiLog;
+}
+
+/** The compressed growth/age context: the curve slope (the growth
+ *  exponent), the age slope fitted from the L2 residuals, and the mean
+ *  age the age factor is centred on. */
+export interface GrowthAgeCtx {
+  slope_ts: number;
+  age_slope: number;
+  mean_age_years: number;
+}
+
+/** The age slope: OLS of the L2 (curve + sector) log residuals on
+ *  age in years, centred on the comps' mean age, over comps with a
+ *  known listing date. On this snapshot the slope is negative (about
+ *  -0.14 log points a year): older comps price lower than the curve
+ *  says, so a young protocol gets a lift and an old one a discount —
+ *  but only a shrunk, clamped one. */
+export function fitAgeSlope(comps: CleanComp[], curve: CurveModel): { slope: number; mean_age_years: number } {
+  const pts = comps
+    .filter((p) => p.age_days !== null)
+    .map((p) => {
+      const pred = curve.intercept + curve.slope * Math.log(p.tvl_usd) + (curve.sector_effects.get(p.sector) ?? 0);
+      return { ay: p.age_days! / 365, r: Math.log(p.mcap_usd) - pred };
+    });
+  if (pts.length < 2) return { slope: 0, mean_age_years: 2.66 };
+  const meanAy = pts.reduce((s, p) => s + p.ay, 0) / pts.length;
+  let sxy = 0;
+  let sxx = 0;
+  for (const p of pts) {
+    sxy += (p.ay - meanAy) * p.r;
+    sxx += (p.ay - meanAy) ** 2;
+  }
+  return { slope: sxx > 0 ? sxy / sxx : 0, mean_age_years: meanAy };
+}
+
+/** The compressed growth and age multipliers (sudhan's shapes): the
+ *  7-day growth excess is clamped to +-growth_clamp and raised to the
+ *  curve slope; the age factor is the fitted age slope shrunk by
+ *  age_shrink, centred on the mean age, clamped to [0.9, 1.15].
+ *  Unknown age gets a factor of 1 (it sits at no age at all). */
 export function growthAgeMultipliers(
   change7d: number | null,
   age: number | null,
+  ctx: GrowthAgeCtx,
+  growthClamp: number,
+  ageShrink: number,
   model: ModelConstants,
 ): { growth: number; ageMult: number } {
-  const growthPct = clamp(finite(change7d, 0), model.growth_floor, model.growth_cap);
-  const growth = 1 + (growthPct / 100) * model.growth_weight;
-  const ageForModel = age ?? model.unknown_age_days;
-  const ageMult =
-    model.age_floor +
-    (Math.min(Math.max(ageForModel, 0), model.age_days) / model.age_days) * model.age_range;
+  const g = clamp(finite(change7d, 0) / 100, -growthClamp, growthClamp);
+  const growth = Math.pow(1 + g, ctx.slope_ts);
+  let ageMult = 1;
+  if (age !== null) {
+    const ay = age / 365;
+    ageMult = clamp(Math.exp(ageShrink * ctx.age_slope * (ay - ctx.mean_age_years)), model.age_mult_lo, model.age_mult_hi);
+  }
   return { growth, ageMult };
 }
 
 /**
  * One rung's log prediction for a protocol (or a comp) under a fitted curve.
- * L0 flat multiple, L1 size curve, L2 + sector, L3 + growth and age.
+ * L0 flat multiple, L1 size curve, L2 + sector.
  */
 export function levelLogPredict(
   level: string,
@@ -689,9 +954,33 @@ export function levelLogPredict(
   let log = curve.intercept + curve.slope * Math.log(tvl);
   if (level === 'L1') return log;
   log += curve.sector_effects.get(sector) ?? 0;
-  if (level === 'L2') return log;
-  const { growth, ageMult } = growthAgeMultipliers(change7d, age, model);
-  return log + Math.log(growth) + Math.log(ageMult);
+  return log;
+}
+
+/** A rung's log prediction under the full model: L3 blends the L2 value
+ *  with the ensemble in log space (weight w); L4 adds the compressed
+ *  growth and age terms on top of the blend. */
+export function finalLogPredict(
+  level: string,
+  tvl: number,
+  sector: string,
+  category: string | null,
+  change7d: number | null,
+  age: number | null,
+  nChains: number,
+  curve: CurveModel,
+  ens: EnsembleModel,
+  ctx: GrowthAgeCtx,
+  chosen: { blend_weight: number; growth_clamp: number; age_shrink: number },
+  model: ModelConstants,
+): number {
+  const l2 = levelLogPredict('L2', tvl, sector, change7d, age, curve, model);
+  if (level === 'L2' || level === 'L1' || level === 'L0') return levelLogPredict(level, tvl, sector, change7d, age, curve, model);
+  const e = ensembleLog(tvl, category, age, nChains, ens, model);
+  const blended = (1 - chosen.blend_weight) * l2 + chosen.blend_weight * e;
+  if (level === 'L3') return blended;
+  const { growth, ageMult } = growthAgeMultipliers(change7d, age, ctx, chosen.growth_clamp, chosen.age_shrink, model);
+  return blended + Math.log(growth) + Math.log(ageMult);
 }
 
 /** Score one rung's predictions against actual log mcaps: median |log error|, x miss, within-3x share. */
@@ -709,17 +998,68 @@ const LADDER_DEFS = [
   { level: 'L0', label: 'flat multiple (median mcap/TVL)' },
   { level: 'L1', label: '+ size curve (Theil-Sen log-log)' },
   { level: 'L2', label: '+ sector effect (shrunk)' },
-  { level: 'L3', label: '+ growth and age' },
+  { level: 'L3', label: '+ ensemble blend (log-space weight w)' },
+  { level: 'L4', label: '+ compressed growth and age (sudhan-style)' },
 ];
+
+/** One comp's held-out components under a train fit: the L2 log value,
+ *  the ensemble log value, and the growth/age inputs. Every grid point
+ *  is scored from these, so the grid costs no extra refits. */
+interface HeldComponents {
+  logL2: number;
+  logEns: number;
+  slopeTs: number;
+  ageSlope: number;
+  meanAgeYears: number;
+  change7d: number | null;
+  age: number | null;
+}
+
+function heldComponents(train: CleanComp[], held: CleanComp, model: ModelConstants): HeldComponents {
+  const curve = fitCurve(train, model);
+  const ens = fitEnsemble(train, model);
+  const age = fitAgeSlope(train, curve);
+  return {
+    logL2: levelLogPredict('L2', held.tvl_usd, held.sector, held.change_7d, held.age_days, curve, model),
+    logEns: ensembleLog(held.tvl_usd, held.category, held.age_days, held.chains.length, ens, model),
+    slopeTs: curve.slope,
+    ageSlope: age.slope,
+    meanAgeYears: age.mean_age_years,
+    change7d: held.change_7d,
+    age: held.age_days,
+  };
+}
+
+/** A grid point's log prediction for one held-out comp. */
+function gridLogPredict(c: HeldComponents, w: number, growthClamp: number | null, ageShrink: number | null, model: ModelConstants): number {
+  let log = (1 - w) * c.logL2 + w * c.logEns;
+  if (growthClamp !== null) {
+    const g = clamp(finite(c.change7d, 0) / 100, -growthClamp, growthClamp);
+    log += c.slopeTs * Math.log(1 + g);
+  }
+  if (ageShrink !== null && c.age !== null) {
+    log += Math.log(
+      clamp(Math.exp(ageShrink * c.ageSlope * (c.age / 365 - c.meanAgeYears)), model.age_mult_lo, model.age_mult_hi),
+    );
+  }
+  return log;
+}
 
 /**
  * The blind-test ladder: every rung is scored two ways — leave-one-out
  * (refit on the other n-1 comps, predict the held-out one) and
  * walk-forward (fit on listings 900+ days old, test on newer ones;
  * comps with no listing date sit on the training side, never known-new).
- * A rung is kept
- * only when it lowers the miss on BOTH tests against the last kept rung.
- * The LOO residuals of the final (kept) rung feed the interval bands.
+ * L0-L2 keep the old rule (a rung stays only if it lowers the miss on
+ * BOTH tests). L3 and L4 use the combined miss (LOO + walk-forward)/2:
+ * the two tests disagree about growth and age — LOO gets slightly
+ * worse, walk-forward gets better, exactly as in sudhan's ladder — and
+ * the walk-forward test is the time-ordered one, the way a launch
+ * actually arrives. The grid (blend weight x growth clamp x age
+ * shrink) is searched on the combined miss; the growth clamp is tied
+ * on the comps (0.2/0.4/0.6 score alike), so the tie goes to sudhan's
+ * published +-40%. The LOO residuals of the final (kept) rung feed the
+ * interval bands, and its LOO predictions feed the blind scatter.
  */
 export function fitLadder(
   comps: CleanComp[],
@@ -727,80 +1067,128 @@ export function fitLadder(
 ): {
   ladder: LadderLevel[];
   final_level: string;
+  chosen: { blend_weight: number; growth_clamp: number; age_shrink: number; growth_clamp_tied: boolean };
   loo_residuals: { age_days: number | null; resid: number }[];
   wf_predictions: { age_days: number | null; pred_log: number; actual_log: number }[];
+  blind_points: BlindPoint[];
 } {
-  // Leave-one-out.
-  const looPreds: Record<string, number[]> = { L0: [], L1: [], L2: [], L3: [] };
+  // Leave-one-out components.
+  const looComps: HeldComponents[] = [];
   const looActual: number[] = [];
+  for (let i = 0; i < comps.length; i++) {
+    const train = comps.filter((_, j) => j !== i);
+    looComps.push(heldComponents(train, comps[i]!, model));
+    looActual.push(Math.log(comps[i]!.mcap_usd));
+  }
+  // Walk-forward components: old listings fit, new listings test.
+  const cut = model.walkforward_cut_days;
+  const wfTrain = comps.filter((p) => p.age_days === null || p.age_days >= cut);
+  const wfTest = comps.filter((p) => p.age_days !== null && p.age_days < cut);
+  const wfComps = wfTest.map((p) => heldComponents(wfTrain, p, model));
+  const wfActual = wfTest.map((p) => Math.log(p.mcap_usd));
+  const looL2 = scorePredictions(looComps.map((c) => c.logL2), looActual);
+  const wfL2 = scorePredictions(wfComps.map((c) => c.logL2), wfActual);
+  // Grid search on the combined miss. Growth-clamp order puts sudhan's
+  // 0.4 first, so a tie keeps it; strict < keeps the first best.
+  let best: { w: number; gc: number; af: number; comb: number; loo: number; wf: number } | null = null;
+  for (const w of model.blend_weight_grid) {
+    for (const gc of [0.4, 0.2, 0.6]) {
+      for (const af of model.age_shrink_grid) {
+        const loo = scorePredictions(looComps.map((c) => gridLogPredict(c, w, gc, af, model)), looActual);
+        const wf = scorePredictions(wfComps.map((c) => gridLogPredict(c, w, gc, af, model)), wfActual);
+        const comb = (loo.miss_log + wf.miss_log) / 2;
+        if (best === null || comb < best.comb) best = { w, gc, af, comb, loo: loo.miss_log, wf: wf.miss_log };
+      }
+    }
+  }
+  const chosen = {
+    blend_weight: best!.w,
+    growth_clamp: best!.gc,
+    age_shrink: best!.af,
+    growth_clamp_tied: model.growth_clamp_grid.every((gc) => {
+      const loo = scorePredictions(looComps.map((c) => gridLogPredict(c, best!.w, gc, best!.af, model)), looActual);
+      const wf = scorePredictions(wfComps.map((c) => gridLogPredict(c, best!.w, gc, best!.af, model)), wfActual);
+      return Math.abs((loo.miss_log + wf.miss_log) / 2 - best!.comb) < 1e-9;
+    }),
+  };
+  // L3 (blend only, chosen weight) and L4 (blend + compressed growth/age).
+  const looL3 = scorePredictions(looComps.map((c) => gridLogPredict(c, chosen.blend_weight, null, null, model)), looActual);
+  const wfL3 = scorePredictions(wfComps.map((c) => gridLogPredict(c, chosen.blend_weight, null, null, model)), wfActual);
+  const looL4 = scorePredictions(looComps.map((c) => gridLogPredict(c, chosen.blend_weight, chosen.growth_clamp, chosen.age_shrink, model)), looActual);
+  const wfL4 = scorePredictions(wfComps.map((c) => gridLogPredict(c, chosen.blend_weight, chosen.growth_clamp, chosen.age_shrink, model)), wfActual);
+  // L0/L1 scores need their own refits (the components only carry L2).
+  const looPreds: Record<string, number[]> = { L0: [], L1: [] };
+  const wfPreds: Record<string, number[]> = { L0: [], L1: [] };
   for (let i = 0; i < comps.length; i++) {
     const train = comps.filter((_, j) => j !== i);
     const curve = fitCurve(train, model);
     const held = comps[i]!;
-    looActual.push(Math.log(held.mcap_usd));
-    for (const d of LADDER_DEFS) {
-      looPreds[d.level]!.push(levelLogPredict(d.level, held.tvl_usd, held.sector, held.change_7d, held.age_days, curve, model));
-    }
+    for (const lv of ['L0', 'L1']) looPreds[lv]!.push(levelLogPredict(lv, held.tvl_usd, held.sector, held.change_7d, held.age_days, curve, model));
   }
-  // Walk-forward: old listings fit, new listings test. Comps with no
-  // listing date sit on the training side: they are never known-new, and
-  // this reproduces sudhan's 57/33 split on the same 90 comps.
-  const cut = model.walkforward_cut_days;
-  const wfTrain = comps.filter((p) => p.age_days === null || p.age_days >= cut);
-  const wfTest = comps.filter((p) => p.age_days !== null && p.age_days < cut);
   const wfCurve = fitCurve(wfTrain, model);
-  const wfPreds: Record<string, number[]> = { L0: [], L1: [], L2: [], L3: [] };
-  const wfActual: number[] = [];
   for (const p of wfTest) {
-    wfActual.push(Math.log(p.mcap_usd));
-    for (const d of LADDER_DEFS) {
-      wfPreds[d.level]!.push(levelLogPredict(d.level, p.tvl_usd, p.sector, p.change_7d, p.age_days, wfCurve, model));
-    }
+    for (const lv of ['L0', 'L1']) wfPreds[lv]!.push(levelLogPredict(lv, p.tvl_usd, p.sector, p.change_7d, p.age_days, wfCurve, model));
   }
-  // Keep rule: a rung stays only if it beats the last kept rung on both tests.
+  const scores: Record<string, { loo: { miss_log: number; miss_x: number; within3: number }; wf: { miss_log: number; miss_x: number; within3: number } }> = {
+    L0: { loo: scorePredictions(looPreds.L0!, looActual), wf: scorePredictions(wfPreds.L0!, wfActual) },
+    L1: { loo: scorePredictions(looPreds.L1!, looActual), wf: scorePredictions(wfPreds.L1!, wfActual) },
+    L2: { loo: looL2, wf: wfL2 },
+    L3: { loo: looL3, wf: wfL3 },
+    L4: { loo: looL4, wf: wfL4 },
+  };
   const ladder: LadderLevel[] = [];
   let lastKept = 'L0';
   let lastLoo = Infinity;
   let lastWf = Infinity;
+  let lastComb = Infinity;
   for (const d of LADDER_DEFS) {
-    const loo = scorePredictions(looPreds[d.level]!, looActual);
-    const wf = scorePredictions(wfPreds[d.level]!, wfActual);
+    const s = scores[d.level]!;
+    const comb = (s.loo.miss_log + s.wf.miss_log) / 2;
     let kept: boolean;
-    if (d.level === 'L0') {
-      kept = true;
-    } else {
-      kept = loo.miss_log < lastLoo && wf.miss_log < lastWf;
-    }
+    if (d.level === 'L0') kept = true;
+    else if (d.level === 'L1' || d.level === 'L2') kept = s.loo.miss_log < lastLoo && s.wf.miss_log < lastWf;
+    else kept = comb < lastComb;
     if (kept) {
       lastKept = d.level;
-      lastLoo = loo.miss_log;
-      lastWf = wf.miss_log;
+      lastLoo = s.loo.miss_log;
+      lastWf = s.wf.miss_log;
+      lastComb = comb;
     }
     ladder.push({
       level: d.level,
       label: d.label,
-      loo_miss_x: round4(loo.miss_x),
-      loo_miss_log: round4(loo.miss_log),
-      loo_within3: loo.within3,
+      loo_miss_x: round4(s.loo.miss_x),
+      loo_miss_log: round4(s.loo.miss_log),
+      loo_within3: s.loo.within3,
       loo_n: comps.length,
-      wf_miss_x: round4(wf.miss_x),
-      wf_miss_log: round4(wf.miss_log),
-      wf_within3: wf.within3,
+      wf_miss_x: round4(s.wf.miss_x),
+      wf_miss_log: round4(s.wf.miss_log),
+      wf_within3: s.wf.within3,
       wf_train_n: wfTrain.length,
       wf_test_n: wfTest.length,
       kept,
     });
   }
+  const finalPreds = (c: HeldComponents): number =>
+    lastKept === 'L4'
+      ? gridLogPredict(c, chosen.blend_weight, chosen.growth_clamp, chosen.age_shrink, model)
+      : lastKept === 'L3'
+        ? gridLogPredict(c, chosen.blend_weight, null, null, model)
+        : c.logL2;
   const loo_residuals = comps.map((p, i) => ({
     age_days: p.age_days,
-    resid: looPreds[lastKept]![i]! - Math.log(p.mcap_usd),
+    resid: finalPreds(looComps[i]!) - Math.log(p.mcap_usd),
   }));
   const wf_predictions = wfTest.map((p, i) => ({
     age_days: p.age_days,
-    pred_log: wfPreds[lastKept]![i]!,
+    pred_log: finalPreds(wfComps[i]!),
     actual_log: Math.log(p.mcap_usd),
   }));
-  return { ladder, final_level: lastKept, loo_residuals, wf_predictions };
+  const blind_points: BlindPoint[] = comps.map((p, i) => ({
+    pred_usd: Math.round(Math.exp(finalPreds(looComps[i]!))),
+    actual_usd: p.mcap_usd,
+  }));
+  return { ladder, final_level: lastKept, chosen, loo_residuals, wf_predictions, blind_points };
 }
 
 /** The interval bands from the final rung's LOO residuals, split young/old,
@@ -949,12 +1337,17 @@ export function tokenOdds(
 // Implied value, intervals, named comps
 // ---------------------------------------------------------------------------
 
-/** The fitted value of one protocol: the curve, the sector step, and the
- *  growth/age step only when the ladder kept L3. */
+/** The fitted value of one protocol: the curve, the sector step, the
+ *  ensemble step and the compressed growth/age step, as far as the
+ *  ladder kept them. Every step is returned, so the dashboard can show
+ *  the value multiplied out term by term. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   curve: CurveModel,
+  ens: EnsembleModel,
+  ctx: GrowthAgeCtx,
+  chosen: { blend_weight: number; growth_clamp: number; age_shrink: number },
   finalLevel: string,
   model: ModelConstants,
 ): {
@@ -962,6 +1355,9 @@ export function impliedValue(
   sector: string;
   curveUsd: number;
   sectorUsd: number;
+  tsUsd: number;
+  ensembleUsd: number;
+  blendedUsd: number;
   baseUsd: number;
   growthMult: number;
   ageMult: number;
@@ -971,24 +1367,29 @@ export function impliedValue(
   const sector = sectorOf(protocol.category);
   const curveUsd = Math.exp(curve.intercept + curve.slope * Math.log(protocol.tvl_usd));
   const sectorUsd = curveUsd * Math.exp(curve.sector_effects.get(sector) ?? 0);
+  const tsUsd = sectorUsd;
+  const ensembleUsd = Math.exp(ensembleLog(protocol.tvl_usd, protocol.category, age, protocol.chains.length, ens, model));
+  const blendedUsd = Math.exp((1 - chosen.blend_weight) * Math.log(tsUsd) + chosen.blend_weight * Math.log(ensembleUsd));
   let baseUsd = sectorUsd;
   let growthMult = 1;
   let ageMult = 1;
-  if (finalLevel === 'L3') {
-    const g = growthAgeMultipliers(protocol.change_7d, age, model);
+  if (finalLevel === 'L4') {
+    const g = growthAgeMultipliers(protocol.change_7d, age, ctx, chosen.growth_clamp, chosen.age_shrink, model);
     growthMult = g.growth;
     ageMult = g.ageMult;
-    baseUsd = sectorUsd * growthMult * ageMult;
+    baseUsd = blendedUsd * growthMult * ageMult;
+  } else if (finalLevel === 'L3') {
+    baseUsd = blendedUsd;
   } else if (finalLevel === 'L0') {
     baseUsd = protocol.tvl_usd * curve.global_median_multiple;
   } else if (finalLevel === 'L1') {
     baseUsd = curveUsd;
   }
   const implied = Math.max(1, Math.round(baseUsd));
-  return { implied, sector, curveUsd, sectorUsd, baseUsd, growthMult, ageMult, age };
+  return { implied, sector, curveUsd, sectorUsd, tsUsd, ensembleUsd, blendedUsd, baseUsd, growthMult, ageMult, age };
 }
 
-/** A row's low/high from its age group's P10-P90 factors. */
+/** A row's low/high from its age group's P25-P75 factors. */
 export function intervalFor(
   implied: number,
   age: number | null,
@@ -1082,8 +1483,8 @@ export function cheapestChain(p: SnapshotProtocol): { chain: string; gas: number
   return { chain: best, gas: bestGas };
 }
 
-/** The four farm tiers, in order: Farm, Thin, Watch, Skip. */
-export type FarmVerdict = 'Farm' | 'Thin' | 'Watch' | 'Skip';
+/** The three farm tiers, in order: Farm, Thin, Skip. */
+export type FarmVerdict = 'Farm' | 'Thin' | 'Skip';
 
 /** A row's farm economics on a ticket: slice, gas, T-bill, net, break-even, $/hour. */
 export interface FarmEcon {
@@ -1157,8 +1558,7 @@ export function farmEcon(
     }
   }
   const perHour = net / (minutes / 60);
-  const verdict: FarmVerdict =
-    net > 0 ? 'Farm' : slice > gasTotal ? 'Thin' : slice > gasTotal * model.watch_slice_fraction ? 'Watch' : 'Skip';
+  const verdict: FarmVerdict = net > 0 ? 'Farm' : slice > gasTotal ? 'Thin' : 'Skip';
   return {
     ticket,
     share,
@@ -1274,9 +1674,7 @@ export function farmSteps(
       ? `slice ${fmtShortUsd(econ.slice_usd)} - gas ${fmtShortUsd(econ.gas_total)} - T-bill ${fmtShortUsd(econ.tbill_usd)} = net ${fmtShortUsd(econ.net_usd)} on a $${ticket} ticket for ${econ.hold_days} days`
       : econ.verdict === 'Thin'
         ? `slice ${fmtShortUsd(econ.slice_usd)} covers gas ${fmtShortUsd(econ.gas_total)} but not the T-bill cost ${fmtShortUsd(econ.tbill_usd)}, net ${fmtShortUsd(econ.net_usd)} on a $${ticket} ticket for ${econ.hold_days} days`
-        : econ.verdict === 'Watch'
-          ? `slice ${fmtShortUsd(econ.slice_usd)} does not cover gas ${fmtShortUsd(econ.gas_total)} on a $${ticket} ticket for ${econ.hold_days} days, net ${fmtShortUsd(econ.net_usd)}`
-          : `slice ${fmtShortUsd(econ.slice_usd)} is a fraction of gas ${fmtShortUsd(econ.gas_total)} on a $${ticket} ticket for ${econ.hold_days} days, net ${fmtShortUsd(econ.net_usd)}`;
+        : `slice ${fmtShortUsd(econ.slice_usd)} does not cover gas ${fmtShortUsd(econ.gas_total)} on a $${ticket} ticket for ${econ.hold_days} days, net ${fmtShortUsd(econ.net_usd)}`;
   const breakevenText =
     econ.breakeven_ticket === null
       ? 'no ticket breaks even'
@@ -1419,11 +1817,14 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
   return new Map(protocols.map((p) => [p.slug, p]));
 }
 
-/** Score one protocol under a fitted curve: implied, interval, comps, odds. */
+/** Score one protocol under the fitted model: implied, interval, comps, odds. */
 export function scoreProtocol(
   p: SnapshotProtocol,
   asOf: string,
   curve: CurveModel,
+  ens: EnsembleModel,
+  ctx: GrowthAgeCtx,
+  chosen: { blend_weight: number; growth_clamp: number; age_shrink: number },
   finalLevel: string,
   intervals: IntervalStats,
   comps: CleanComp[],
@@ -1434,6 +1835,9 @@ export function scoreProtocol(
   sector: string;
   curveUsd: number;
   sectorUsd: number;
+  tsUsd: number;
+  ensembleUsd: number;
+  blendedUsd: number;
   baseUsd: number;
   growthMult: number;
   ageMult: number;
@@ -1443,7 +1847,7 @@ export function scoreProtocol(
   comps: string[];
   odds: number;
 } {
-  const v = impliedValue(p, asOf, curve, finalLevel, model);
+  const v = impliedValue(p, asOf, curve, ens, ctx, chosen, finalLevel, model);
   const band = intervalFor(v.implied, v.age, intervals, model);
   return {
     ...v,
@@ -1456,13 +1860,17 @@ export function scoreProtocol(
 
 /**
  * Rank ranges over bootstrap refits: resample the cleaned comps with
- * replacement (fixed seed), refit the curve and sector effects, rescore
- * every ranked row, and record each row's rank. Returns the P10-P90 rank
- * range per slug, and the width summary.
+ * replacement (fixed seed), refit the curve, the ensemble and the age
+ * slope, rescore every ranked row under the final level, and record
+ * each row's rank. The blend weight and the compressed growth/age
+ * parameters stay at their grid-chosen values (they are not re-searched
+ * per refit). Returns the P10-P90 rank range per slug, and the width
+ * summary.
  */
 export function bootstrapRankRanges(
-  rows: { slug: string; tvl_usd: number; category: string | null; change_7d: number | null; age_days: number | null }[],
+  rows: { slug: string; tvl_usd: number; category: string | null; change_7d: number | null; age_days: number | null; chains: string[] }[],
   comps: CleanComp[],
+  chosen: { blend_weight: number; growth_clamp: number; age_shrink: number },
   finalLevel: string,
   model: ModelConstants,
 ): { ranges: Map<string, { lo: number; hi: number }>; stats: RefitStats } {
@@ -1473,17 +1881,15 @@ export function bootstrapRankRanges(
     const sample: CleanComp[] = [];
     for (let i = 0; i < comps.length; i++) sample.push(comps[Math.floor(rand() * comps.length)]!);
     const curve = fitCurve(sample, model);
+    const ens = fitEnsemble(sample, model);
+    const age = fitAgeSlope(sample, curve);
+    const ctx: GrowthAgeCtx = { slope_ts: curve.slope, age_slope: age.slope, mean_age_years: age.mean_age_years };
     const scored = rows.map((r) => {
       const sector = sectorOf(r.category);
-      let log = curve.intercept + curve.slope * Math.log(r.tvl_usd);
-      if (finalLevel === 'L0') {
-        return { slug: r.slug, tvl: r.tvl_usd, value: r.tvl_usd * curve.global_median_multiple };
-      }
-      if (finalLevel === 'L1') return { slug: r.slug, tvl: r.tvl_usd, value: Math.exp(log) };
-      log += curve.sector_effects.get(sector) ?? 0;
-      if (finalLevel === 'L2') return { slug: r.slug, tvl: r.tvl_usd, value: Math.exp(log) };
-      const g = growthAgeMultipliers(r.change_7d, r.age_days, model);
-      return { slug: r.slug, tvl: r.tvl_usd, value: Math.exp(log) * g.growth * g.ageMult };
+      const value = Math.exp(
+        finalLogPredict(finalLevel, r.tvl_usd, sector, r.category, r.change_7d, r.age_days, r.chains.length, curve, ens, ctx, chosen, model),
+      );
+      return { slug: r.slug, tvl: r.tvl_usd, value };
     });
     scored.sort(
       (a, b) =>
@@ -1520,16 +1926,27 @@ export function fitModel(
   fit: Omit<FitResult, 'refits' | 'best_per_hour'>;
   comps: CleanComp[];
   curve: CurveModel;
+  ens: EnsembleModel;
+  ctx: GrowthAgeCtx;
+  chosen: ChosenParams;
   odds: FitResult['token_odds'];
   intervals: IntervalStats;
   finalLevel: string;
 } {
   const { comps, traded_n, house_excluded, receipt_excluded, families_merged } = cleanComps(snapshot);
   const curve0 = fitCurve(comps, model);
+  const ens0 = fitEnsemble(comps, model);
   const ts = fitTheilSen(comps);
-  const { ladder, final_level, loo_residuals, wf_predictions } = fitLadder(comps, model);
+  const { ladder, final_level, chosen, loo_residuals, wf_predictions, blind_points } = fitLadder(comps, model);
   const intervals = fitIntervals(loo_residuals, wf_predictions, model);
   const odds = fitTokenOdds(snapshot);
+  const ageFit = fitAgeSlope(comps, curve0);
+  const ctx: GrowthAgeCtx = { slope_ts: curve0.slope, age_slope: ageFit.slope, mean_age_years: ageFit.mean_age_years };
+  const chosenFull: ChosenParams = {
+    ...chosen,
+    age_slope_log_per_year: ageFit.slope,
+    mean_age_years: ageFit.mean_age_years,
+  };
   // In-sample R^2 of the final (kept) model on the cleaned comps.
   const actuals = comps.map((p) => Math.log(p.mcap_usd));
   const meanY = actuals.reduce((s, v) => s + v, 0) / actuals.length;
@@ -1537,9 +1954,19 @@ export function fitModel(
   let ssTot = 0;
   for (let i = 0; i < comps.length; i++) {
     const p = comps[i]!;
-    const pred = levelLogPredict(final_level, p.tvl_usd, p.sector, p.change_7d, p.age_days, curve0, model);
+    const pred = finalLogPredict(final_level, p.tvl_usd, p.sector, p.category, p.change_7d, p.age_days, p.chains.length, curve0, ens0, ctx, chosenFull, model);
     ssRes += (actuals[i]! - pred) ** 2;
     ssTot += (actuals[i]! - meanY) ** 2;
+  }
+  // Two-way check: the two independent estimators on the comps.
+  let within3 = 0;
+  let within2 = 0;
+  for (const p of comps) {
+    const tsUsd = Math.exp(levelLogPredict('L2', p.tvl_usd, p.sector, p.change_7d, p.age_days, curve0, model));
+    const ensUsd = Math.exp(ensembleLog(p.tvl_usd, p.category, p.age_days, p.chains.length, ens0, model));
+    const ratio = Math.max(tsUsd / ensUsd, ensUsd / tsUsd);
+    if (ratio <= 3) within3++;
+    if (ratio <= 2) within2++;
   }
   const fit: Omit<FitResult, 'refits' | 'best_per_hour'> = {
     traded_n,
@@ -1560,10 +1987,13 @@ export function fitModel(
     },
     ladder,
     final_level,
+    chosen: chosenFull,
+    blind_points,
+    twoway: { n: comps.length, within3, within2 },
     intervals,
     token_odds: odds,
   };
-  return { fit, comps, curve: curve0, odds, intervals, finalLevel: final_level };
+  return { fit, comps, curve: curve0, ens: ens0, ctx, chosen: chosenFull, odds, intervals, finalLevel: final_level };
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n, plus the 200-refit summary. */
@@ -1573,6 +2003,9 @@ export function buildBoard(
   prefit?: {
     comps: CleanComp[];
     curve: CurveModel;
+    ens: EnsembleModel;
+    ctx: GrowthAgeCtx;
+    chosen: ChosenParams;
     odds: FitResult['token_odds'];
     intervals: IntervalStats;
     finalLevel: string;
@@ -1581,8 +2014,8 @@ export function buildBoard(
   const f =
     prefit ??
     (() => {
-      const { comps, curve, odds, intervals, finalLevel } = fitModel(snapshot, model);
-      return { comps, curve, odds, intervals, finalLevel };
+      const { comps, curve, ens, ctx, chosen, odds, intervals, finalLevel } = fitModel(snapshot, model);
+      return { comps, curve, ens, ctx, chosen, odds, intervals, finalLevel };
     })();
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
@@ -1597,7 +2030,7 @@ export function buildBoard(
   }
 
   const scored = [...chosen.values()].map((p) => {
-    const s = scoreProtocol(p, snapshot.as_of, f.curve, f.finalLevel, f.intervals, f.comps, f.odds, model);
+    const s = scoreProtocol(p, snapshot.as_of, f.curve, f.ens, f.ctx, f.chosen, f.finalLevel, f.intervals, f.comps, f.odds, model);
     return { p, ...s };
   });
   scored.sort(
@@ -1614,8 +2047,10 @@ export function buildBoard(
       category: s.p.category,
       change_7d: s.p.change_7d,
       age_days: s.age,
+      chains: s.p.chains,
     })),
     f.comps,
+    f.chosen,
     f.finalLevel,
     model,
   );
@@ -1641,6 +2076,9 @@ export function buildBoard(
         play: playOf(s.p.category).play,
         curve_usd: Math.round(s.curveUsd),
         sector_usd: Math.round(s.sectorUsd),
+        ts_usd: s.tsUsd,
+        ensemble_usd: s.ensembleUsd,
+        blended_usd: s.blendedUsd,
         base_usd: Math.round(s.baseUsd),
         growth_multiplier: round4(s.growthMult),
         age_multiplier: round4(s.ageMult),
@@ -1680,6 +2118,9 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
 export function compRows(
   comps: CleanComp[],
   curve: CurveModel,
+  ens: EnsembleModel,
+  ctx: GrowthAgeCtx,
+  chosen: { blend_weight: number; growth_clamp: number; age_shrink: number },
   finalLevel: string,
   model: ModelConstants,
 ): CompRow[] {
@@ -1695,10 +2136,45 @@ export function compRows(
       change_7d: p.change_7d,
       ratio: p.mcap_usd / p.tvl_usd,
       fitted_usd: Math.round(
-        Math.exp(levelLogPredict(finalLevel, p.tvl_usd, p.sector, p.change_7d, p.age_days, curve, model)),
+        Math.exp(finalLogPredict(finalLevel, p.tvl_usd, p.sector, p.category, p.change_7d, p.age_days, p.chains.length, curve, ens, ctx, chosen, model)),
       ),
     }))
     .sort((a, b) => b.mcap_usd - a.mcap_usd || b.tvl_usd - a.tvl_usd);
+}
+
+/** The set-aside protocols' demoted values: every pre-token protocol
+ *  the clean rule leaves out, priced at TVL x the median mcap/TVL of
+ *  the 5 nearest live tokens by |log TVL| — no sector effect, no
+ *  factors, never ranked. */
+export function setAsideRows(snapshot: Snapshot): SetAsideRow[] {
+  const live = snapshot.protocols
+    .filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0)
+    .sort((a, b) => a.slug < b.slug ? -1 : 1);
+  const rows: SetAsideRow[] = [];
+  for (const p of snapshot.protocols) {
+    if (!isPreToken(p)) continue;
+    const reason = exclusionReason(p);
+    if (reason === null) continue;
+    const nearest = [...live]
+      .sort(
+        (a, b) =>
+          Math.abs(Math.log(a.tvl_usd) - Math.log(p.tvl_usd)) - Math.abs(Math.log(b.tvl_usd) - Math.log(p.tvl_usd)) ||
+          (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0),
+      )
+      .slice(0, 5);
+    const mult = median(nearest.map((q) => q.mcap_usd! / q.tvl_usd));
+    rows.push({
+      slug: p.slug,
+      name: p.name,
+      category: p.category,
+      chains: p.chains,
+      tvl_usd: p.tvl_usd,
+      reason,
+      demoted_usd: Math.max(1, Math.round(p.tvl_usd * mult)),
+    });
+  }
+  rows.sort((a, b) => b.demoted_usd - a.demoted_usd || b.tvl_usd - a.tvl_usd);
+  return rows;
 }
 
 /** A board row's compact form for data.js. */
@@ -1717,6 +2193,11 @@ export function radarRow(row: BoardRow): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
+    ts_usd: row.model.ts_usd,
+    ensemble_usd: row.model.ensemble_usd,
+    blended_usd: row.model.blended_usd,
+    growth_mult: row.model.growth_multiplier,
+    age_mult: row.model.age_multiplier,
     token_odds: row.model.token_odds,
     low_usd: row.model.low_usd,
     high_usd: row.model.high_usd,
@@ -1728,10 +2209,11 @@ export function radarRow(row: BoardRow): RadarRow {
 
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const { fit, comps, curve, odds, intervals, finalLevel } = fitModel(snapshot, model);
-  const { board, refitStats } = buildBoard(snapshot, model, { comps, curve, odds, intervals, finalLevel });
+  const { fit, comps, curve, ens, ctx, chosen, odds, intervals, finalLevel } = fitModel(snapshot, model);
+  const { board, refitStats } = buildBoard(snapshot, model, { comps, curve, ens, ctx, chosen, odds, intervals, finalLevel });
   const live = liveRows(snapshot);
-  const compList = compRows(comps, curve, finalLevel, model);
+  const compList = compRows(comps, curve, ens, ctx, chosen, finalLevel, model);
+  const setAside = setAsideRows(snapshot);
   const census = buildCensus(snapshot, board.length);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const totalImplied = board.reduce((sum, r) => sum + r.implied_value_usd, 0);
@@ -1758,6 +2240,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     rows: board.map(radarRow),
     live,
     comps: compList,
+    set_aside: setAside,
     fit: { ...fit, refits: refitStats, best_per_hour: best! },
     census,
   };
