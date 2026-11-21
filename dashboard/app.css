@@ -80,6 +80,12 @@ tbody tr[data-selected="true"] { background: #1b2c4e; }
 .implied .bar i { display: block; height: 100%; background: var(--gold); }
 .status { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--gold-dim); color: var(--gold); }
 .status.live { border-color: #2b6cb0; color: var(--blue); }
+.verdict { display: inline-block; font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.verdict.v-Farm { border-color: #2f9e44; color: #69db7c; }
+.verdict.v-Thin { border-color: var(--gold-dim); color: var(--gold); }
+.verdict.v-Watch { border-color: #2b6cb0; color: var(--blue); }
+.knobs { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin: 10px 0 4px; font-size: 13px; }
+.knobs select { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--text); }
 .model { padding: 18px 20px; }
 .model h2 { margin: 0 0 6px; font-size: 18px; }
 .model h3 { margin: 16px 0 4px; font-size: 14.5px; color: var(--gold); }

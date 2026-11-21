@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/token-radar-01/lively-wren-88-6565/token-radar-01/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/lively-wren-88-6565/token-radar-01/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
-A radar of pre-token protocols from the DefiLlama protocol index (snapshot 2026-11-14), ranked by a value model fitted on the snapshot's traded tokens: a category-multiple/log-log blend ensembled 2/3 + 1/3 with a multivariate fit (log TVL, age, chains, per-category levels), then growth, age and chains. 196 rows, all 40 watchlist protocols covered, each with a costed farm plan ending in a Farm / Thin / Watch / Skip verdict judged on the odds-adjusted value. The live-token protocols are set aside with their market caps shown, never mixed into the ranking. Implied value is a model, not a price and not a prediction of a launch.
+A radar of pre-token protocols from the DefiLlama protocol index (snapshot 2026-11-14), ranked by a value model fitted on the snapshot's traded tokens: a Theil-Sen log-log size curve over 90 cleaned comps (one per ticker, house categories and receipt tokens out), plus a shrunken sector effect. Every term was tested on a blind-test ladder (leave-one-out and old-to-new walk-forward) and kept only when it lowered the miss on both: the sector stays, growth and age do not. 196 rows, all 40 watchlist protocols covered, each with a P25–P75 range, a rank range over 200 refits, three named comps, and a costed farm plan on a $1,000 ticket at a 10% share, net of gas and the 4% T-bill the ticket gives up, ending in a Farm / Thin / Watch / Skip verdict (30 / 37 / 60 / 69). The live-token protocols are set aside with their market caps shown, never mixed into the ranking. Implied value is a model, not a price and not a prediction of a launch.
 
 ## Run it
 
@@ -17,18 +17,25 @@ Node 22.18 or later. `main.ts` reads the sealed snapshot, scores every rankable 
 ## How implied value is computed
 
 ```
-blend    = exp( 0.5 x log(TVL x category multiple) + 0.5 x log(exp(6.965 + 0.522 x log(TVL))) )
-multi    = exp(multivariate fit of log(mcap) on log(TVL), age in years, log1p(chains), per-category levels)
-base     = exp( (2/3) x log(blend) + (1/3) x log(multi) )
-implied  = round( base x growth x age x chains )
-growth   = 1 + clamp(change_7d, -30, 60) / 100 x 0.5
-age      = 0.70 + min(age_days, 1095) / 1095 x 0.30
-chains   = 1 + 0.02 x min(chains - 1, 5)
-multiple = median mcap/TVL per category where the category has 5+ traded comps,
-           else the global median (0.214), clamped to [0.05, 1.00]
+curve    = exp( 7.876 + 0.466 x log(TVL) )   [Theil-Sen, median pairwise slope, n = 90 cleaned comps]
+implied  = round( curve x exp(sector effect) )   [sector shrunk n/(n+4); Trading x1.92, Vaults x0.41]
+range    = implied x P25-P75 of the leave-one-out residuals (young <540d x0.35-x8.82, older x0.31-x2.96)
 ```
 
-One fitted function scores every protocol; no name is special-cased. The dashboard states the formula, the fitted multiples, and the held-out test (fit on 103 comps, scored on 25 unseen: ensemble median |log error| 1.24, out-of-sample R² 0.16; 5-fold cross-validation mean median |log error| ensemble 1.29 vs blend 1.40), and recomputes each row from it, so the page's code and `board.json` visibly agree. Token odds come from a logistic regression on all 758 protocols and are shown as their own column, not multiplied in.
+Blind-test ladder (miss in x units, median |log error| exponentiated):
+
+```
+L0 flat multiple   LOO x5.07   walk-forward x4.64   kept (baseline)
+L1 + size curve    LOO x3.53   walk-forward x2.98   kept
+L2 + sector        LOO x3.24   walk-forward x2.64   kept
+L3 + growth, age   LOO x3.63   walk-forward x3.08   dropped (helps neither test)
+```
+
+Walk-forward fits on listings 900+ days old (plus comps with no listing date, never known-new) and tests on the 33 newer listings. The bands hold 46/90 leave-one-out and 19/33 walk-forward. Rank ranges over 200 bootstrap refits of the comps: median width 43 ranks, so the ordering is fragile and the page says so on every row.
+
+Farm economics, per row: slice = implied x 10% x $1,000/(TVL+$1,000) x hold/(ahead+hold), ahead = half the days with no token (capped at 365); net = slice - gas - the 4% T-bill the ticket gives up over the hold (60 or 90 days by play); Farm when net > 0, Thin when the slice covers gas, Watch when it covers a quarter of gas, Skip below that. Best per hour: GoonFi +$22.15/h.
+
+One fitted function scores every protocol; no name is special-cased. The dashboard states the formula, the sector effects, and the ladder, and recomputes each row from it, so the page's code and `board.json` visibly agree. Token odds come from a logistic regression on all 758 protocols and are shown as their own column, not multiplied in (multiplying them would reshuffle the top 10: 8/10 overlap, Bittensor dTAO would fall from #1 to #4).
 
 ---
 
