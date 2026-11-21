@@ -1,4 +1,4 @@
-// Token Radar (radar-7): the entrypoint the grader runs.
+// Token Radar (radar-8): the entrypoint the grader runs.
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
 // scores every clean pre-token protocol with the fitted model in lib/model.ts,
@@ -111,17 +111,17 @@ const ladderLine = fit.ladder
 const iv = fit.intervals;
 const ch = fit.chosen;
 const slices: number[] = [];
-const gases: number[] = [];
+const fees: number[] = [];
 for (const r of board) {
   const p = snapshot.protocols.find((x) => x.slug === r.slug)!;
   const e = farmEcon(p, r.age_days, r.implied_value_usd, MODEL);
   slices.push(e.slice_usd);
-  gases.push(e.gas_total);
+  fees.push(e.fees_total);
 }
 slices.sort((a, b) => a - b);
-gases.sort((a, b) => a - b);
+fees.sort((a, b) => a - b);
 const medSlice = slices[Math.floor(slices.length / 2)]!;
-const medGas = gases[Math.floor(gases.length / 2)]!;
+const medFees = fees[Math.floor(fees.length / 2)]!;
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside, ${radar.set_aside.length} set aside with demoted values)\n` +
@@ -134,6 +134,6 @@ process.stdout.write(
     `token radar: 200-refit rank range median width ${fit.refits.median_rank_width}, p90 ${fit.refits.p90_rank_width}, ${fit.refits.rows_with_width_le_10}/196 rows within 10 ranks\n` +
     `token radar: top ${board[0]!.name} $${board[0]!.implied_value_usd}, total implied $${radar.total_implied_usd}; best per hour ${fit.best_per_hour.name} ${fit.best_per_hour.per_hour_usd >= 0 ? '+' : ''}$${fit.best_per_hour.per_hour_usd}/h (${fit.best_per_hour.verdict})\n` +
     `token radar: census ${radar.census.total} = ${radar.census.ranked} ranked + ${radar.census.traded_mcap} traded + ${radar.census.token_recorded_no_mcap} token recorded without mcap + ${radar.census.pretoken_excluded} pre-token excluded\n` +
-    `token radar: farm verdicts on a $1000 ticket: ${verdicts.Farm} Farm, ${verdicts.Thin} Thin, ${verdicts.Skip} Skip; median slice $${medSlice}, median gas $${medGas}\n` +
+    `token radar: farm verdicts on a $1000 ticket: ${verdicts.Farm} Farm, ${verdicts.Thin} Thin, ${verdicts.Skip} Skip; median slice $${medSlice}, median fees $${medFees}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashboardFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

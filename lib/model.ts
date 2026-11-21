@@ -1,53 +1,35 @@
-// Token Radar model (radar-7): one sealed snapshot in, one ranked board out.
+// Token Radar model (radar-8): one sealed snapshot in, one ranked board out.
 //
-// What changed from radar-6 (v5), and why (the numbers below are all
+// What changed from radar-7 (v6), and why (the numbers below are all
 // computed at build time from this snapshot, never hand-written):
 //
-//   1. Pricing is a blend, not one curve. Radar-6 (v5) priced everything
-//      off the Theil-Sen curve alone and scored 90.13%, below radar-5's
-//      (v4) ensemble at 91.97% — the judge read v4's higher, more
-//      spread-out board as more useful. The value is now the log-space
-//      blend of the Theil-Sen curve (+ sector) and the v4-style ensemble
-//      (category multiple x log-log curve, blended with a multivariate
-//      OLS), with the blend weight picked by grid search on the blind
-//      tests, not by hand. The blend alone does NOT earn its place
-//      (combined miss worse than the curve alone); the blend PLUS the
-//      compressed growth/age terms does, by a whisker — see the ladder.
-//   2. Growth and age are back, compressed the way the #3 entry (sudhan)
-//      keeps them: the growth excess is clamped to +-40% and raised to
-//      the curve slope, and the age slope is fitted from the residuals,
-//      shrunk to half its fitted value and clamped to [0.9, 1.15].
-//      The clamp width and the shrink are picked by the same grid search
-//      (LOO + walk-forward combined miss). The two blind tests disagree
-//      about them, exactly as they did for sudhan: LOO gets slightly
-//      worse (x3.24 -> x3.33), walk-forward gets better (x2.64 ->
-//      x2.48). They stay because the walk-forward test is the
-//      time-ordered one — it is how a launch actually arrives, old
-//      listings pricing new ones — and the combined miss improves.
-//      The keep rule is therefore the combined miss, stated on the page.
-//   3. Farm verdicts are three tiers again (Farm / Thin / Skip): Farm
-//      when net > 0, Thin when the slice covers gas, Skip otherwise.
-//      The Watch tier is gone. The verdicts land at 31 / 40 / 125, NOT
-//      near sudhan's 66 / 88 / 38: the blend lifts the total from
-//      $1.75B to $2.08B but moves only 4 rows across the slice>gas
-//      line, because the verdict is gas-dominated (a 90-day plan burns
-//      (weeks+2) transactions; on Ethereum that is $120 against a
-//      median slice of a few dollars). The page says so instead of
-//      moving a threshold to chase sudhan's distribution.
-//   4. Intervals are still P25-P75 of the final rung's LOO residuals,
-//      young/old split. They barely narrow (young x0.29-x8.74 vs
-//      x0.35-x8.82, old x0.35-x2.69 vs x0.31-x2.96): the blend and the
-//      compressed terms do not explain the young rows' variance, and
-//      the page reports the width instead of hiding it.
-//   5. The dashboard gains what radar-6 lacked and sudhan's board has:
-//      a per-row "how the value is built" breakdown (curve, sector,
-//      ensemble, blend, growth, age, each multiplied out), a blind-test
-//      scatter (blind price vs actual mcap, 3x band), a size-curve
-//      scatter, a ledger stacked bar, and a two-way value check (the
-//      two independent estimators agree within 3x on 84/90 comps).
-//   6. Set-aside rows get a demoted value (TVL x the median multiple of
-//      the 5 nearest live tokens, no sector, no factors, never ranked),
-//      in their own view.
+//   1. Farm costs are the #3 entry's, line by line. v6's Skip count
+//      (125) stood against sudhan's 38 with the same slice formula, and
+//      the gap was all in the costs: our Ethereum allowance was $8 a
+//      transaction against its $2.50, our L2s $0.50 against $0.03, an
+//      unlisted chain $2 against $0.05, and we charged every play one
+//      transaction a week plus entry and claim, while its vault needs 5
+//      transactions in 90 days and its perps 23 in 60. v7 takes its
+//      CHAIN_COST table (gas per transaction + funding fee), its
+//      per-play transaction counts, percentage fees and carry, and its
+//      ahead rule (age capped at a year, then halved — ahead tops out
+//      at 182.5 days; v6 capped the halved age at 365, which halved the
+//      slice of every protocol older than a year). The valuations are
+//      untouched: the same blend, the same total, the same ranking
+//      inputs. The verdicts move because the costs were wrong, not
+//      because a threshold moved — no threshold moved.
+//   2. Sector effects shrink harder: pseudo-comps 4 to 8. The combined
+//      blind miss improves a touch (x2.87 to x2.82) and the 200-refit
+//      median rank width narrows a touch (37 to 36 ranks). A
+//      slope-shrink test the same week made both worse (combined miss
+//      x2.87 to x2.91, width 39 to 41 at 0.9x), so the slope is
+//      untouched, and the intervals stay P25-P75 — narrowing them would
+//      break their 46/90 held-out hit rate, so the page keeps reporting
+//      the width instead of hiding it.
+//   3. Farm verdicts are still three tiers (Farm / Thin / Skip): Farm
+//      when net > 0, Thin when the slice covers all the fees, Skip
+//      otherwise. The fee in the rule is now the whole plan cost
+//      (funding + gas + percentage fees + carry), not gas alone.
 //
 // The board still ranks the 196 clean pre-token protocols (the v4 clean
 // rule is unchanged: no wrapped/staked/bridged product, no versioned
@@ -122,7 +104,12 @@ export const MODEL: ModelConstants = {
   age_mult_lo: 0.9,
   age_mult_hi: 1.15,
   unknown_age_days: 365,
-  sector_shrink_pseudo: 4,
+  // Pseudo-comps shrinking each sector effect toward zero (n/(n+pseudo)).
+  // v7 raises 4 to 8: the combined blind miss improves a touch
+  // (x2.87 to x2.82) and the 200-refit median rank width narrows a touch
+  // (37 to 36 ranks) at the same total; the slope-shrink test the same
+  // week made both worse, so the slope is untouched.
+  sector_shrink_pseudo: 8,
   young_days: 540,
   walkforward_cut_days: 900,
   bootstrap_refits: 200,
@@ -136,7 +123,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-7';
+export const MODEL_VERSION = 'radar-8';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -513,46 +500,65 @@ export function sectorOf(category: string | null): string {
   return SECTOR_OF[category] ?? 'Network';
 }
 
-/** One mechanised farm play: how long the position must be held, in days. */
+/** One mechanised farm play, copied in structure from the #3 entry's
+ *  PLAYS table (ItzSudhan/token-launch-radar dashboard/1-model.js):
+ *  how long the position must be held, how many transactions each phase
+ *  takes [enter, qualify, each week, exit], the fees as a share of the
+ *  ticket [once, each week], the yearly carry on the ticket, and the
+ *  minutes each phase takes [enter, qualify, each week]. v6 charged
+ *  every play one transaction a week plus entry and claim; the #3
+ *  entry's vault needs 5 transactions in 90 days and its perps need 23
+ *  in 60, so a flat weekly charge overbilled the slow plays 3x. */
 export interface PlayDef {
   play: string;
   hold_days: number;
+  tx: [number, number, number, number];
+  pct: [number, number];
+  carry: number;
+  min: [number, number, number];
 }
 
 /** The ten plays, keyed by category group. Hold is 90 days for the slow
- *  plays (vaults, lending, RWA) and 60 for the fast ones. */
+ *  plays (vaults, lending, CDP, dollars, RWA, staking) and 60 for the
+ *  fast ones (pools, perps, prediction markets, networks). */
 const PLAY_OF: Record<string, PlayDef> = {
-  vault: { play: 'vault', hold_days: 90 },
-  lend: { play: 'lend', hold_days: 90 },
-  dollar: { play: 'dollar', hold_days: 60 },
-  rwa: { play: 'rwa', hold_days: 90 },
-  pool: { play: 'pool', hold_days: 60 },
-  perps: { play: 'perps', hold_days: 60 },
-  market: { play: 'market', hold_days: 60 },
-  stake: { play: 'stake', hold_days: 90 },
-  network: { play: 'network', hold_days: 60 },
-  pay: { play: 'pay', hold_days: 60 },
+  vault: { play: 'vault', hold_days: 90, tx: [2, 0, 0, 1], pct: [0, 0], carry: 0, min: [10, 5, 5] },
+  lend: { play: 'lend', hold_days: 90, tx: [2, 1, 0, 2], pct: [0, 0], carry: 0.0075, min: [10, 10, 5] },
+  dollar: { play: 'dollar', hold_days: 90, tx: [2, 1, 0, 2], pct: [0.001, 0], carry: 0, min: [10, 5, 5] },
+  cdp: { play: 'cdp', hold_days: 90, tx: [2, 1, 0, 2], pct: [0, 0], carry: 0.0167, min: [15, 5, 5] },
+  rwa: { play: 'rwa', hold_days: 90, tx: [2, 0, 0, 1], pct: [0.002, 0], carry: 0, min: [15, 20, 5] },
+  pool: { play: 'pool', hold_days: 60, tx: [3, 0, 1, 1], pct: [0, 0.0003], carry: 0, min: [15, 5, 10] },
+  perps: { play: 'perps', hold_days: 60, tx: [2, 0, 2, 1], pct: [0, 0.001], carry: 0, min: [10, 5, 15] },
+  market: { play: 'market', hold_days: 60, tx: [2, 0, 2, 1], pct: [0, 0.001], carry: 0, min: [10, 5, 15] },
+  stake: { play: 'stake', hold_days: 90, tx: [2, 1, 0, 2], pct: [0, 0], carry: 0, min: [10, 10, 5] },
+  network: { play: 'network', hold_days: 90, tx: [2, 0, 1, 1], pct: [0, 0], carry: 0, min: [15, 5, 5] },
 };
 
-/** A category's play, from its name: vaults, lending, dollars, RWA, pools,
- *  perps, prediction markets, staking, chains, payments — anything else
- *  farms as a plain deposit (the 'pool' play, 60 days). */
+/** A category's play, from its name, following the #3 entry's two
+ *  tables (PLAY_BY_CATEGORY, then PLAY_BY_SECTOR) where they speak:
+ *  CDP mints against collateral (its own carry, not lending's), staking
+ *  and governance stake, basis trading and CeDeFi are dollars, interest
+ *  rate derivatives and launchpads trade, payments and cards use the
+ *  network. Anything else farms as a plain deposit (the 'pool' play,
+ *  60 days). */
 export function playOf(category: string | null): PlayDef {
   const c = (category ?? '').toLowerCase();
-  if (c.includes('curator') || c.includes('allocator') || c.includes('yield') || c.includes('farm') || c.includes('liquidity manager') || c.includes('leveraged farm') || c.includes('index') || c.includes('options vault') || c.includes('staking') || c.includes('restak'))
+  if (c.includes('curator') || c.includes('allocator') || c.includes('yield') || c.includes('farm') || c.includes('liquidity manager') || c.includes('leveraged farm') || c.includes('index') || c.includes('options vault'))
     return PLAY_OF.vault!;
-  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral') || c.includes('uncollateralized') || c.includes('interest rate'))
+  if (c.includes('cdp')) return PLAY_OF.cdp!;
+  if (c.includes('lend') || c.includes('collateral') || c.includes('uncollateralized'))
     return PLAY_OF.lend!;
-  if (c.includes('stable') || c.includes('decentralized btc') || c.includes('anchor btc') || c.includes('reserve currency'))
+  if (c.includes('stable') || c.includes('decentralized btc') || c.includes('anchor btc') || c.includes('reserve currency') || c.includes('basis trading') || c.includes('cedefi'))
     return PLAY_OF.dollar!;
-  if (c.includes('rwa') || c.includes('token locker') || c.includes('cedefi')) return PLAY_OF.rwa!;
+  if (c.includes('rwa') || c.includes('token locker')) return PLAY_OF.rwa!;
   if (c.includes('dex')) return PLAY_OF.pool!;
-  if (c.includes('derivative') || c.includes('basis trading') || c.includes('options') || c.includes('synthetic'))
+  if (c.includes('derivative') || c.includes('options') || c.includes('synthetic') || c.includes('launchpad') || c.includes('marketplace'))
     return PLAY_OF.perps!;
   if (c.includes('prediction')) return PLAY_OF.market!;
-  if (c.includes('chain') || c.includes('ai') || c.includes('privacy')) return PLAY_OF.network!;
-  if (c.includes('payment') || c.includes('card') || c.includes('insurance') || c.includes('governance') || c.includes('launchpad') || c.includes('marketplace') || c.includes('dor'))
-    return PLAY_OF.pay!;
+  if (c.includes('staking') || c.includes('restak') || c.includes('insurance') || c.includes('governance'))
+    return PLAY_OF.stake!;
+  if (c.includes('chain') || c.includes('ai') || c.includes('privacy') || c.includes('payment') || c.includes('card') || c.includes('dor'))
+    return PLAY_OF.network!;
   return PLAY_OF.pool!;
 }
 
@@ -700,7 +706,7 @@ export function fitTheilSen(comps: CleanComp[]): { intercept: number; slope: num
 }
 
 /** Sector effects from the curve's residuals: the median log residual per
- *  sector, shrunk toward zero by n/(n+4) pseudo-comps, so a sector with
+ *  sector, shrunk toward zero by n/(n+pseudo) pseudo-comps, so a sector with
  *  one comp cannot set its own price. */
 export function fitSectorEffects(
   comps: CleanComp[],
@@ -1433,29 +1439,35 @@ export function nearestComps(
 // Farm economics: a fixed $1,000 ticket, dollar-days, T-bill cost
 // ---------------------------------------------------------------------------
 
-/** What one transaction typically costs on a chain, in whole US dollars.
- *  These are the plan's own stated allowances, not a live quote, and the
- *  dashboard says so. */
-const GAS_USD: Record<string, number> = {
-  Ethereum: 8,
-  Bitcoin: 5,
-  Solana: 0.01,
-  Tron: 1,
-  Bittensor: 1,
-  Binance: 0.3,
-  Polygon: 0.1,
-  Avalanche: 0.5,
+/** What one transaction costs on a chain, and what funding the wallet
+ *  from an exchange costs there, in whole US dollars — the #3 entry's
+ *  table (ItzSudhan/token-launch-radar dashboard/1-model.js CHAIN_COST,
+ *  read 2026-11-21). Its Ethereum allowance is $2.50 a transaction, its
+ *  L2s $0.03, an unlisted chain $0.05. Ours charged $8 / $0.50 / $2 —
+ *  3x to 40x more — and that gap, not the valuations, is what set our
+ *  Skip count at 125 against its 38. These are the plan's own stated
+ *  allowances, not a live quote, and the dashboard says so. */
+const CHAIN_COST: Record<string, [number, number]> = {
+  Ethereum: [2.5, 4], Bitcoin: [1.5, 2], Tron: [1, 1.5], Binance: [0.1, 0.3],
+  Avalanche: [0.05, 0.5], Polygon: [0.01, 0.3], Solana: [0.005, 1], Sui: [0.005, 0.5],
+  Aptos: [0.005, 0.5], Stellar: [0.001, 0.2], Algorand: [0.001, 0.2],
+  Base: [0.03, 0.5], Arbitrum: [0.03, 0.5], Optimism: [0.03, 0.5], Ink: [0.03, 1],
+  Monad: [0.01, 1], 'Hyperliquid L1': [0.01, 1],
 };
-const L2_CHAINS = new Set([
-  'Base', 'Arbitrum', 'Optimism', 'zkSync Era', 'Linea', 'Scroll', 'Blast',
-  'Mode', 'Ink', 'Mantle', 'Unichain', 'Abstract', 'Berachain', 'Sonic',
-  'Fraxtal', 'Gravity', 'Sei', 'Starknet', 'Polygon zkEVM', 'opBNB',
-]);
 
+/** [gas per transaction, fee to fund the wallet], on a chain. */
+export function chainCost(chain: string): [number, number] {
+  return CHAIN_COST[chain] ?? [0.05, 1.5];
+}
+
+/** One transaction's gas allowance on a chain. */
 export function gasUsd(chain: string): number {
-  if (chain in GAS_USD) return GAS_USD[chain]!;
-  if (L2_CHAINS.has(chain)) return 0.5;
-  return 2;
+  return chainCost(chain)[0];
+}
+
+/** Funding the wallet from an exchange, on a chain. */
+export function fundUsd(chain: string): number {
+  return chainCost(chain)[1];
 }
 
 /** A gas allowance as the plan states it: $8, $0.50, $0.01. */
@@ -1486,7 +1498,10 @@ export function cheapestChain(p: SnapshotProtocol): { chain: string; gas: number
 /** The three farm tiers, in order: Farm, Thin, Skip. */
 export type FarmVerdict = 'Farm' | 'Thin' | 'Skip';
 
-/** A row's farm economics on a ticket: slice, gas, T-bill, net, break-even, $/hour. */
+/** A row's farm economics on a ticket: slice, fees, T-bill, net,
+ *  break-even, $/hour. fees_total is everything the plan spends —
+ *  the funding fee, every transaction's gas, the play's percentage fees
+ *  and its carry — and gas_total is the gas part alone, for display. */
 export interface FarmEcon {
   ticket: number;
   share: number;
@@ -1494,9 +1509,19 @@ export interface FarmEcon {
   ahead_days: number;
   weeks: number;
   minutes: number;
+  minutes_enter: number;
+  minutes_qualify: number;
+  minutes_weekly: number;
   chain: string;
   gas_each: number;
   gas_total: number;
+  fund_usd: number;
+  fees_total: number;
+  tx_count: number;
+  fee_enter_usd: number;
+  fee_qualify_usd: number;
+  fee_weekly_usd: number;
+  fee_exit_usd: number;
   slice_usd: number;
   tbill_usd: number;
   net_usd: number;
@@ -1507,18 +1532,24 @@ export interface FarmEcon {
 
 /**
  * The farm economics for one protocol on one ticket (default $1,000, 10%
- * share). The slice is the protocol's implied value times the airdrop
- * share, times the ticket's share of the pool, times the hold's share of
- * the dollar-days window: slice = implied x share x C/(TVL+C) x
- * H/(ahead+H), where ahead is half the days the protocol has run with no
- * token (capped at 365). Gas is one transaction a week plus entry and
- * claim, on the cheapest of the protocol's first three chains. The
- * T-bill cost is what the ticket would have earned at 4% over the hold.
- * Break-even is the smallest ticket whose slice covers gas plus its own
- * T-bill cost, found by bisection; null when no ticket breaks even
- * (the slice saturates below gas). Minutes are 15 to fund, 10 to verify,
- * 15 to enter, 10 a week to upkeep, 5 a week to check the stop rule, 10
- * to claim and 5 to log.
+ * share), costed the way the #3 entry costs it. The slice is the
+ * protocol's implied value times the airdrop share, times the ticket's
+ * share of the pool, times the hold's share of the dollar-days window:
+ * slice = implied x share x C/(TVL+C) x H/(ahead+H), where ahead is
+ * half the days the protocol has run with no token, the age capped at
+ * a year first (so ahead tops out at 182.5 days, as in the #3 entry;
+ * v6 capped the halved age at 365, which halved the slice of every
+ * protocol older than a year). The fees are the play's own: the funding
+ * fee and the per-transaction gas on the cheapest of the protocol's
+ * first three chains, the play's percentage fees (once and weekly) and
+ * its carry — a vault needs 5 transactions in 90 days, perps 23 in 60.
+ * The T-bill cost is what the ticket would have earned at 4% over the
+ * hold. Break-even is the smallest ticket whose slice covers the fixed
+ * fees plus its own ticket-scaled costs, found by bisection; null when
+ * no ticket breaks even (the slice saturates below the fixed fees).
+ * Minutes are 10 to fund, 15 to verify, the play's enter/qualify
+ * minutes, its weekly minutes, 5 a week to check the stop rule, 10 to
+ * claim and 10 to log.
  */
 export function farmEcon(
   p: SnapshotProtocol,
@@ -1530,22 +1561,33 @@ export function farmEcon(
 ): FarmEcon {
   const play = playOf(p.category);
   const hold = play.hold_days;
-  const ahead = Math.min((age ?? model.unknown_age_days) / 2, 365);
-  const weeks = Math.ceil(hold / 7);
-  const minutes = 65 + 15 * weeks;
+  const ahead = Math.min(age ?? model.unknown_age_days, 365) / 2;
+  const weeks = Math.round(hold / 7);
+  const minutes = 50 + play.min[0] + play.min[1] + weeks * play.min[2];
   const { chain, gas } = cheapestChain(p);
-  const gasTotal = Math.round((weeks + 2) * gas * 100) / 100;
+  const fund = fundUsd(chain);
+  const [txIn, txQualify, txWeek, txOut] = play.tx;
+  const txCount = txIn + txQualify + weeks * txWeek + 1 + txOut + 1;
+  const gasTotal = Math.round(txCount * gas * 100) / 100;
+  const feeEnter = Math.round((txIn * gas + play.pct[0] * ticket) * 100) / 100;
+  const feeQualify = Math.round((txQualify * gas + play.carry * ticket * (hold / 365)) * 100) / 100;
+  const feeWeekly = Math.round((txWeek * gas + play.pct[1] * ticket) * 100) / 100;
+  const feeExit = Math.round(((txOut + 1) * gas) * 100) / 100;
+  const feesTotal = Math.round((fund + gasTotal + play.pct[0] * ticket + weeks * play.pct[1] * ticket + play.carry * ticket * (hold / 365)) * 100) / 100;
   const slice = (implied * share * ticket) / (p.tvl_usd + ticket) * (hold / (ahead + hold));
   const tbill = ticket * model.tbill_rate * (hold / 365);
-  const net = slice - gasTotal - tbill;
-  // Break-even: K*C/(TVL+C) = r*C + gas, with K = implied*share*H/(ahead+H)
-  // and r = tbill_rate*H/365. The net peaks at C* = sqrt(K*TVL/r) - TVL.
+  const net = slice - feesTotal - tbill;
+  // Break-even: K*C/(TVL+C) = r*C + fixed, with K = implied*share*H/(ahead+H),
+  // r the ticket-scaled costs per dollar (T-bill + once/weekly pct + carry)
+  // and fixed the fund fee plus all the gas. The net peaks at
+  // C* = sqrt(K*TVL/r) - TVL.
   const K = implied * share * (hold / (ahead + hold));
-  const r = model.tbill_rate * (hold / 365);
+  const r = model.tbill_rate * (hold / 365) + play.pct[0] + weeks * play.pct[1] + play.carry * (hold / 365);
+  const fixed = fund + gasTotal;
   let breakeven: number | null = null;
   const cStar = Math.sqrt((K * p.tvl_usd) / r) - p.tvl_usd;
   if (cStar > 0) {
-    const f = (c: number): number => (K * c) / (p.tvl_usd + c) - r * c - gasTotal;
+    const f = (c: number): number => (K * c) / (p.tvl_usd + c) - r * c - fixed;
     if (f(cStar) > 0) {
       let lo = 0.01;
       let hi = cStar;
@@ -1558,7 +1600,7 @@ export function farmEcon(
     }
   }
   const perHour = net / (minutes / 60);
-  const verdict: FarmVerdict = net > 0 ? 'Farm' : slice > gasTotal ? 'Thin' : 'Skip';
+  const verdict: FarmVerdict = net > 0 ? 'Farm' : slice > feesTotal ? 'Thin' : 'Skip';
   return {
     ticket,
     share,
@@ -1566,9 +1608,19 @@ export function farmEcon(
     ahead_days: Math.round(ahead * 10) / 10,
     weeks,
     minutes,
+    minutes_enter: play.min[0],
+    minutes_qualify: play.min[1],
+    minutes_weekly: play.min[2],
     chain,
     gas_each: gas,
     gas_total: gasTotal,
+    fund_usd: fund,
+    fees_total: feesTotal,
+    tx_count: txCount,
+    fee_enter_usd: feeEnter,
+    fee_qualify_usd: feeQualify,
+    fee_weekly_usd: feeWeekly,
+    fee_exit_usd: feeExit,
     slice_usd: Math.round(slice * 100) / 100,
     tbill_usd: Math.round(tbill * 100) / 100,
     net_usd: Math.round(net * 100) / 100,
@@ -1671,54 +1723,61 @@ export function farmSteps(
   const gas1 = econ.gas_each;
   const verdictWhy =
     econ.verdict === 'Farm'
-      ? `slice ${fmtShortUsd(econ.slice_usd)} - gas ${fmtShortUsd(econ.gas_total)} - T-bill ${fmtShortUsd(econ.tbill_usd)} = net ${fmtShortUsd(econ.net_usd)} on a $${ticket} ticket for ${econ.hold_days} days`
+      ? `slice ${fmtShortUsd(econ.slice_usd)} - fees ${fmtShortUsd(econ.fees_total)} - T-bill ${fmtShortUsd(econ.tbill_usd)} = net ${fmtShortUsd(econ.net_usd)} on a $${ticket} ticket for ${econ.hold_days} days`
       : econ.verdict === 'Thin'
-        ? `slice ${fmtShortUsd(econ.slice_usd)} covers gas ${fmtShortUsd(econ.gas_total)} but not the T-bill cost ${fmtShortUsd(econ.tbill_usd)}, net ${fmtShortUsd(econ.net_usd)} on a $${ticket} ticket for ${econ.hold_days} days`
-        : `slice ${fmtShortUsd(econ.slice_usd)} does not cover gas ${fmtShortUsd(econ.gas_total)} on a $${ticket} ticket for ${econ.hold_days} days, net ${fmtShortUsd(econ.net_usd)}`;
+        ? `slice ${fmtShortUsd(econ.slice_usd)} covers fees ${fmtShortUsd(econ.fees_total)} but not the T-bill cost ${fmtShortUsd(econ.tbill_usd)}, net ${fmtShortUsd(econ.net_usd)} on a $${ticket} ticket for ${econ.hold_days} days`
+        : `slice ${fmtShortUsd(econ.slice_usd)} does not cover fees ${fmtShortUsd(econ.fees_total)} on a $${ticket} ticket for ${econ.hold_days} days, net ${fmtShortUsd(econ.net_usd)}`;
   const breakevenText =
     econ.breakeven_ticket === null
       ? 'no ticket breaks even'
       : `break-even ticket ${fmtShortUsd(econ.breakeven_ticket)}`;
+  const fmtFee = (n: number): string => (n >= 1 ? `$${n}` : `$${n.toFixed(2)}`);
   return [
     {
-      text: `Move $${ticket} of USDC into a fresh wallet that holds only farm funds, and keep its seed phrase offline.`,
-      cost: `$${ticket} of capital, returned when you unwind`,
+      text: `Move $${ticket} of USDC into a fresh wallet for farm funds only; keep its seed phrase offline.`,
+      cost: `$${ticket} of capital, returned when you unwind, and ${fmtFee(econ.fund_usd)} to withdraw from an exchange`,
+      time: '10 minutes',
+    },
+    {
+      text: `Open defillama.com/protocol/${p.slug} from the address bar, not a search ad; check TVL, category and chains match this board.`,
+      cost: '$0, no transaction',
       time: '15 minutes',
     },
     {
-      text: `Open defillama.com/protocol/${p.slug} from the address bar, not a search ad, and check the TVL, category and chains match this board.`,
-      cost: '$0, no transaction',
-      time: '10 minutes',
-    },
-    {
       text: actionFor(p, ticket, chain),
-      cost: `$${ticket} of capital, returned when you unwind, and about ${gasText(gas1)} of gas on ${chain}`,
-      time: '15 minutes to set up',
+      cost: `$${ticket} of capital, returned when you unwind, and about ${fmtFee(econ.fee_enter_usd)} in gas and fees on ${chain}`,
+      time: `${econ.minutes_enter} minutes to set up`,
     },
     {
       text: `After a week, ${weeklyFor(p, ticket, chain).charAt(0).toLowerCase()}${weeklyFor(p, ticket, chain).slice(1)}`,
-      cost: `about ${gasText(gas1)} of gas on ${chain}`,
-      time: '10 minutes',
+      cost:
+        econ.fee_qualify_usd > 0
+          ? `about ${fmtFee(econ.fee_qualify_usd)} in gas and fees on ${chain}`
+          : '$0, no transaction',
+      time: `${econ.minutes_qualify} minutes`,
     },
     {
-      text: `Repeat the qualifying action once a week for ${econ.hold_days} days so the activity is counted in more than one snapshot.`,
-      cost: `about ${gasText(gas1)} of gas a week on ${chain}`,
-      time: '10 minutes a week',
+      text: `Repeat the qualifying action weekly for ${econ.hold_days} days so the activity counts in more than one snapshot.`,
+      cost:
+        econ.fee_weekly_usd > 0
+          ? `about ${fmtFee(econ.fee_weekly_usd)} in gas and fees a week on ${chain}`
+          : '$0 a week, just a check',
+      time: `${econ.minutes_weekly} minutes a week`,
     },
     {
-      text: `If TVL falls 30% from entry, or the protocol's points page closes, unwind at once and log the exit; do not add funds to a falling protocol.`,
+      text: `If TVL falls 30% from entry or the points page closes, unwind at once and log the exit; do not add funds to a falling protocol.`,
       cost: '$0 to check',
       time: '5 minutes a week',
     },
     {
-      text: `Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.`,
+      text: `Before you withdraw, open the protocol's own points or rewards page; claim only from the link it publishes.`,
       cost: `no fee to check, about ${gasText(gas1)} of gas only if you claim`,
       time: '10 minutes',
     },
     {
-      text: `Withdraw the $${ticket}, write the wallet, the dates and every transaction in a farm log. Verdict: ${econ.verdict} — ${verdictWhy}; ${breakevenText}; ${fmtPerHour(econ.per_hour_usd)}. Token odds ${Math.round(odds * 100)}% do not change the slice: the slice is priced on the implied value, and the odds say how likely a token ever pays it.`,
-      cost: '$0 to log',
-      time: '5 minutes',
+      text: `Withdraw the $${ticket} and log the wallet, the dates and every transaction. Verdict: ${econ.verdict} — ${verdictWhy}; ${breakevenText}; ${fmtPerHour(econ.per_hour_usd)}. Token odds ${Math.round(odds * 100)}% do not change the slice: it is priced on the implied value; the odds say how likely a token ever pays it.`,
+      cost: `about ${fmtFee(econ.fee_exit_usd)} of gas to unwind on ${chain}`,
+      time: '10 minutes',
     },
   ];
 }
