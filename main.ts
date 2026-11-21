@@ -129,6 +129,10 @@ process.stdout.write(
     `token radar: Theil-Sen log(mcap) = ${fit.curve.intercept} + ${fit.curve.slope} x log(TVL), R2 ${fit.curve.r2}, final ${fit.final_level} R2 ${fit.curve.final_r2}\n` +
     `token radar: blend w=${ch.blend_weight} (Theil-Sen vs ensemble), growth clamp +- ${ch.growth_clamp}${ch.growth_clamp_tied ? ' (grid-tied, sudhan 0.4)' : ''}, age shrink ${ch.age_shrink}, age slope ${ch.age_slope_log_per_year} log/yr, mean age ${ch.mean_age_years}y\n` +
     `token radar: ladder ${ladderLine}\n` +
+    `token radar: kinship x${MODEL.kinship_factor} on ${board.filter((r) => r.model.kin).length} rows (${board
+      .filter((r) => r.model.kin)
+      .map((r) => r.slug)
+      .join(', ')}); token odds AUC ${fit.token_odds.auc} in-sample, 5-fold CV ${fit.token_odds.cv_auc}, time-split ${fit.token_odds.time_split_auc} on ${fit.token_odds.time_split_test_n} newer listings\n` +
     `token radar: two-way check: Theil-Sen vs ensemble within 3x on ${fit.twoway.within3}/${fit.twoway.n} comps, within 2x on ${fit.twoway.within2}/${fit.twoway.n}\n` +
     `token radar: intervals P25-P75 young x${iv.young_lo_factor}-x${iv.young_hi_factor} old x${iv.old_lo_factor}-x${iv.old_hi_factor}; LOO hits ${iv.loo_hit_young}/${iv.loo_n_young} young, ${iv.loo_hit_old}/${iv.loo_n_old} old, ${iv.loo_hit_all}/${iv.loo_n_all} all; walk-forward hits ${iv.wf_hit}/${iv.wf_n}\n` +
     `token radar: 200-refit rank range median width ${fit.refits.median_rank_width}, p90 ${fit.refits.p90_rank_width}, ${fit.refits.rows_with_width_le_10}/196 rows within 10 ranks\n` +

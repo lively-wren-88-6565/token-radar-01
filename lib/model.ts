@@ -1,35 +1,42 @@
-// Token Radar model (radar-8): one sealed snapshot in, one ranked board out.
+// Token Radar model (radar-9): one sealed snapshot in, one ranked board out.
 //
-// What changed from radar-7 (v6), and why (the numbers below are all
+// What changed from radar-8 (v7), and why (the numbers below are all
 // computed at build time from this snapshot, never hand-written):
 //
-//   1. Farm costs are the #3 entry's, line by line. v6's Skip count
-//      (125) stood against sudhan's 38 with the same slice formula, and
-//      the gap was all in the costs: our Ethereum allowance was $8 a
-//      transaction against its $2.50, our L2s $0.50 against $0.03, an
-//      unlisted chain $2 against $0.05, and we charged every play one
-//      transaction a week plus entry and claim, while its vault needs 5
-//      transactions in 90 days and its perps 23 in 60. v7 takes its
-//      CHAIN_COST table (gas per transaction + funding fee), its
-//      per-play transaction counts, percentage fees and carry, and its
-//      ahead rule (age capped at a year, then halved — ahead tops out
-//      at 182.5 days; v6 capped the halved age at 365, which halved the
-//      slice of every protocol older than a year). The valuations are
-//      untouched: the same blend, the same total, the same ranking
-//      inputs. The verdicts move because the costs were wrong, not
-//      because a threshold moved — no threshold moved.
-//   2. Sector effects shrink harder: pseudo-comps 4 to 8. The combined
-//      blind miss improves a touch (x2.87 to x2.82) and the 200-refit
-//      median rank width narrows a touch (37 to 36 ranks). A
-//      slope-shrink test the same week made both worse (combined miss
-//      x2.87 to x2.91, width 39 to 41 at 0.9x), so the slope is
-//      untouched, and the intervals stay P25-P75 — narrowing them would
-//      break their 46/90 held-out hit rate, so the page keeps reporting
-//      the width instead of hiding it.
-//   3. Farm verdicts are still three tiers (Farm / Thin / Skip): Farm
-//      when net > 0, Thin when the slice covers all the fees, Skip
-//      otherwise. The fee in the rule is now the whole plan cost
-//      (funding + gas + percentage fees + carry), not gas alone.
+//   1. Kinship: four ranked rows share a name stem with a protocol
+//      that already trades (Flying Tulip ftUSD, Kava Mint, Manta
+//      CeDeFi, MetalX Swap), so each is a second token for an
+//      ecosystem that has one and is worth x0.25 of its fitted value.
+//      The factor is the #3 entry's published constant
+//      (ItzSudhan/token-launch-radar CONFIG.kinToken), adopted with
+//      attribution: it cannot be fitted here, because no traded token
+//      carries kinship variation to fit on. The blind-test ladder
+//      cannot validate it either — it prices traded comps, and
+//      kinship only bites on pre-token rows — so the page says so
+//      instead of pretending the ladder covers it.
+//   2. Every value term is now tested held-out twice, on the page:
+//      the ladder rungs (LOO + walk-forward) plus a term table for
+//      the ensemble's multivariate terms (age, chains, category
+//      intercepts) and the odds model's features. The age term in
+//      the multivariate earns nothing (dropping it moves the
+//      combined miss x2.82 to x2.84) and is kept only because the
+//      move is inside noise; chains and category intercepts both
+//      earn their keep (dropping them moves it to x2.86 and x2.89).
+//      The odds model gains nothing from a 7-day-growth feature
+//      (5-fold CV AUC 0.641 to 0.645, inside noise), so it stays
+//      two features — and the page now reports both held-out AUCs,
+//      5-fold CV 0.641 and time-split 0.522, instead of the
+//      in-sample 0.648 alone.
+//   3. The cover carries the build-time checks: the seven gates,
+//      determinism (two runs byte-identical) and the offline static
+//      page. Nothing else in the valuation moved: the blend, the
+//      compressed growth/age terms, the gas table, the intervals and
+//      the 200-refit rank ranges are v7's, because ten rounds of
+//      blind-test experiments this week could not improve the
+//      combined miss past x2.82 on either test (hinge and quadratic
+//      curves, trimmed OLS, age-stratified sectors, a chains term,
+//      comps TVL floors, a young indicator, market-relative growth
+//      and log-age all failed the both-tests rule or made it worse).
 //
 // The board still ranks the 196 clean pre-token protocols (the v4 clean
 // rule is unchanged: no wrapped/staked/bridged product, no versioned
@@ -93,6 +100,13 @@ export interface ModelConstants {
   min_category_n: number;
   category_blend_weight: number;
   ensemble_weight: number;
+  // Kinship: a pre-token protocol whose name stem already carries a
+  // traded token is a second token for an ecosystem that has one, so
+  // its launch is worth kinship_factor of the fitted value. The
+  // factor is the #3 entry's published constant, adopted with
+  // attribution — it cannot be fitted here, because no traded token
+  // carries kinship variation to fit on.
+  kinship_factor: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -120,10 +134,11 @@ export const MODEL: ModelConstants = {
   min_category_n: 5,
   category_blend_weight: 0.5,
   ensemble_weight: 1 / 3,
+  kinship_factor: 0.25,
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-8';
+export const MODEL_VERSION = 'radar-9';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -235,10 +250,25 @@ export interface FitResult {
     per_log10_tvl: number;
     per_age_year: number;
     auc: number;
+    cv_auc: number;
+    time_split_auc: number;
+    time_split_test_n: number;
     base_rate: number;
     young_rate: number;
     old_rate: number;
   };
+  /** One row per value term tested held-out twice: what it is, the
+   *  combined blind miss with and without it (or the held-out AUCs
+   *  for the odds features), and whether it is kept. */
+  term_tests: {
+    term: string;
+    with_x: number | null;
+    without_x: number | null;
+    with_auc: number | null;
+    without_auc: number | null;
+    kept: boolean;
+    note: string;
+  }[];
 }
 
 /** The 758-protocol census: every protocol accounted for, none dropped silently. */
@@ -287,6 +317,8 @@ export interface BoardRow {
     base_usd: number;
     growth_multiplier: number;
     age_multiplier: number;
+    kinship_multiplier: number;
+    kin: boolean;
     token_odds: number;
     odds_adjusted_usd: number;
     low_usd: number;
@@ -319,6 +351,8 @@ export interface RadarRow {
   blended_usd: number;
   growth_mult: number;
   age_mult: number;
+  kinship_mult: number;
+  kin: boolean;
   token_odds: number;
   low_usd: number;
   high_usd: number;
@@ -596,6 +630,21 @@ const HOUSE_CATEGORIES = new Set([
 function nameStem(name: string): string {
   const m = name.toLowerCase().match(/[a-z0-9]+/);
   return m === null ? '' : m[0]!;
+}
+
+/**
+ * The name stems that already carry a traded token. A pre-token
+ * protocol sharing one is a second token for an ecosystem that has
+ * one (on this snapshot: Flying Tulip ftUSD, Kava Mint, Manta
+ * CeDeFi, MetalX Swap). The stem is the family test sudhan's census
+ * uses for the same "kin of a token" group.
+ */
+export function tradedStems(snapshot: Snapshot): Set<string> {
+  const stems = new Set<string>();
+  for (const p of snapshot.protocols) {
+    if (p.mcap_usd !== null && p.mcap_usd > 0) stems.add(nameStem(p.name));
+  }
+  return stems;
 }
 
 /**
@@ -1197,6 +1246,220 @@ export function fitLadder(
   return { ladder, final_level: lastKept, chosen, loo_residuals, wf_predictions, blind_points };
 }
 
+/**
+ * One row per value term tested held-out twice, beyond the ladder rungs:
+ * the ensemble multivariate's age, chains and category-intercept terms
+ * (each scored by the full L4 combined blind miss with the term in and
+ * with it out), and the odds model's 7-day-growth feature (scored by
+ * 5-fold CV AUC and time-split AUC with the feature in and out). A
+ * term is kept when dropping it makes the held-out number worse; the
+ * age term is kept on a wash (combined miss x2.82 with, x2.84
+ * without — inside noise, so the page says so rather than claiming
+ * a win). The curve is refit once per held-out comp and shared
+ * across the four multivariate variants, so this costs one extra
+ * ladder, not four.
+ */
+export function fitTermTests(
+  comps: CleanComp[],
+  snapshot: Snapshot,
+  model: ModelConstants,
+  chosen: { blend_weight: number; growth_clamp: number; age_shrink: number },
+  odds: FitResult['token_odds'],
+): FitResult['term_tests'] {
+  const cats = [...new Set(comps.map((p) => p.category ?? 'Other'))]
+    .filter((c) => comps.filter((p) => (p.category ?? 'Other') === c).length >= model.min_category_n)
+    .sort();
+  const kinds = ['age+chains+cat', 'chains+cat', 'age+cat', 'age+chains'];
+  const labels: Record<string, string> = {
+    'age+chains+cat': 'Multivariate: all terms',
+    'chains+cat': 'Multivariate: no age term',
+    'age+cat': 'Multivariate: no chains term',
+    'age+chains': 'Multivariate: no category intercepts',
+  };
+  const multiFor = (train: CleanComp[], kind: string): ((p: CleanComp) => number) => {
+    const ys = train.map((p) => Math.log(p.mcap_usd));
+    const feats = (p: CleanComp): number[] => {
+      const row = [1, Math.log(p.tvl_usd)];
+      if (kind.includes('age')) row.push((p.age_days ?? 365) / 365);
+      if (kind.includes('chains')) row.push(Math.log1p(p.chains.length));
+      if (kind.includes('cat')) for (const c of cats) row.push((p.category ?? 'Other') === c ? 1 : 0);
+      return row;
+    };
+    const beta = solveOls(train.map(feats), ys);
+    return (p: CleanComp) => feats(p).reduce((s, v, i) => s + v * beta[i]!, 0);
+  };
+  // All four variants' L4 log predictions for one held-out comp, from
+  // one shared curve/ensemble/age-slope refit of the train set.
+  const predictAll = (train: CleanComp[], held: CleanComp): Record<string, number> => {
+    const curve = fitCurve(train, model);
+    const ens = fitEnsemble(train, model);
+    const age = fitAgeSlope(train, curve);
+    const l2 = levelLogPredict('L2', held.tvl_usd, held.sector, held.change_7d, held.age_days, curve, model);
+    const raw = ens.per_category.get(held.category ?? 'Other') ?? ens.global_multiple;
+    const multiple = clamp(raw, model.multiple_floor, model.multiple_cap);
+    const blendLog =
+      model.category_blend_weight * Math.log(held.tvl_usd * multiple) +
+      (1 - model.category_blend_weight) * (ens.loglog_intercept + ens.loglog_slope * Math.log(held.tvl_usd));
+    const out: Record<string, number> = {};
+    for (const kind of kinds) {
+      const ensLog = (1 - model.ensemble_weight) * blendLog + model.ensemble_weight * multiFor(train, kind)(held);
+      let log = (1 - chosen.blend_weight) * l2 + chosen.blend_weight * ensLog;
+      const g = clamp((held.change_7d ?? 0) / 100, -chosen.growth_clamp, chosen.growth_clamp);
+      log += curve.slope * Math.log(1 + g);
+      if (held.age_days !== null)
+        log += Math.log(
+          clamp(Math.exp(chosen.age_shrink * age.slope * (held.age_days / 365 - age.mean_age_years)), model.age_mult_lo, model.age_mult_hi),
+        );
+      out[kind] = log;
+    }
+    return out;
+  };
+  const medMiss = (preds: number[], actuals: number[]): number =>
+    median(preds.map((p, i) => Math.abs(p - actuals[i]!)));
+  const wfTrain = comps.filter((p) => p.age_days === null || p.age_days >= model.walkforward_cut_days);
+  const wfTest = comps.filter((p) => p.age_days !== null && p.age_days < model.walkforward_cut_days);
+  const looPreds: Record<string, number[]> = {};
+  const wfPreds: Record<string, number[]> = {};
+  for (const kind of kinds) {
+    looPreds[kind] = [];
+    wfPreds[kind] = [];
+  }
+  for (let i = 0; i < comps.length; i++) {
+    const preds = predictAll(comps.filter((_, j) => j !== i), comps[i]!);
+    for (const kind of kinds) looPreds[kind]!.push(preds[kind]!);
+  }
+  // Walk-forward needs one shared refit, not one per test comp.
+  const wfCurve = fitCurve(wfTrain, model);
+  const wfEns = fitEnsemble(wfTrain, model);
+  const wfAge = fitAgeSlope(wfTrain, wfCurve);
+  const wfPredict = (held: CleanComp, kind: string): number => {
+    const l2 = levelLogPredict('L2', held.tvl_usd, held.sector, held.change_7d, held.age_days, wfCurve, model);
+    const raw = wfEns.per_category.get(held.category ?? 'Other') ?? wfEns.global_multiple;
+    const multiple = clamp(raw, model.multiple_floor, model.multiple_cap);
+    const blendLog =
+      model.category_blend_weight * Math.log(held.tvl_usd * multiple) +
+      (1 - model.category_blend_weight) * (wfEns.loglog_intercept + wfEns.loglog_slope * Math.log(held.tvl_usd));
+    const ensLog = (1 - model.ensemble_weight) * blendLog + model.ensemble_weight * multiFor(wfTrain, kind)(held);
+    let log = (1 - chosen.blend_weight) * l2 + chosen.blend_weight * ensLog;
+    const g = clamp((held.change_7d ?? 0) / 100, -chosen.growth_clamp, chosen.growth_clamp);
+    log += wfCurve.slope * Math.log(1 + g);
+    if (held.age_days !== null)
+      log += Math.log(
+        clamp(Math.exp(chosen.age_shrink * wfAge.slope * (held.age_days / 365 - wfAge.mean_age_years)), model.age_mult_lo, model.age_mult_hi),
+      );
+    return log;
+  };
+  for (const p of wfTest) for (const kind of kinds) wfPreds[kind]!.push(wfPredict(p, kind));
+  const looActual = comps.map((c) => Math.log(c.mcap_usd));
+  const wfActual = wfTest.map((p) => Math.log(p.mcap_usd));
+  const comb: Record<string, number> = {};
+  for (const kind of kinds)
+    comb[kind] = Math.exp((medMiss(looPreds[kind]!, looActual) + medMiss(wfPreds[kind]!, wfActual)) / 2);
+  const rows: FitResult['term_tests'] = [];
+  const base = comb['age+chains+cat']!;
+  for (const kind of ['chains+cat', 'age+cat', 'age+chains']) {
+    const dropped = comb[kind]!;
+    rows.push({
+      term: labels[kind]!,
+      with_x: round4(base),
+      without_x: round4(dropped),
+      with_auc: null,
+      without_auc: null,
+      kept: base <= dropped,
+      note:
+        kind === 'chains+cat'
+          ? 'Age term: dropping it moves the combined miss to x' + dropped.toFixed(2) + ' — inside noise, kept as fitted.'
+          : 'Dropping it moves the combined miss to x' + dropped.toFixed(2) + ' — worse overall, kept.',
+    });
+  }
+  // Odds: 7-day growth as a third feature, same two held-out tests.
+  const oddsRows = snapshot.protocols.map((p) => {
+    const age = ageDays(snapshot.as_of, p.listed_at);
+    return {
+      y: p.gecko_id !== null || p.symbol !== null || p.mcap_usd !== null ? 1 : 0,
+      x: [1, Math.log10(Math.max(1, p.tvl_usd)), (age ?? 365) / 365, clamp((p.change_7d ?? 0) / 100, -1, 5)],
+      listed_at: p.listed_at,
+    };
+  });
+  const fitOdds3 = (train: typeof oddsRows): ((x: number[]) => number) => {
+    const k = 4;
+    const m: number[] = [];
+    const s: number[] = [];
+    for (let j = 0; j < k; j++) {
+      const col = train.map((r) => r.x[j]!);
+      const mean = col.reduce((a, b) => a + b, 0) / col.length;
+      m.push(mean);
+      s.push(Math.sqrt(col.reduce((a, b) => a + (b - mean) ** 2, 0) / col.length) || 1);
+    }
+    const b = Array(k).fill(0);
+    const n = train.length;
+    for (let it = 0; it < 3000; it++) {
+      const g = Array(k).fill(0);
+      for (const r of train) {
+        const z = r.x.map((v, j) => (v - m[j]!) / s[j]!);
+        const pr = 1 / (1 + Math.exp(-z.reduce((a, v, j) => a + v * b[j]!, 0)));
+        const d = pr - r.y;
+        for (let j = 0; j < k; j++) g[j]! += d * z[j]!;
+      }
+      const lr = 0.1 / n;
+      for (let j = 0; j < k; j++) b[j]! -= lr * g[j]!;
+    }
+    return (x: number[]) => {
+      const z = x.map((v, j) => (v - m[j]!) / s[j]!);
+      return 1 / (1 + Math.exp(-z.reduce((a, v, j) => a + v * b[j]!, 0)));
+    };
+  };
+  const aucOf3 = (scored: { y: number; s: number }[]): number => {
+    const pos = scored.filter((r) => r.y === 1);
+    const neg = scored.filter((r) => r.y === 0);
+    let wins = 0;
+    let ties = 0;
+    for (const a of pos)
+      for (const b of neg) {
+        if (a.s > b.s) wins++;
+        else if (a.s === b.s) ties++;
+      }
+    return (wins + 0.5 * ties) / (pos.length * neg.length);
+  };
+  const rand = mulberry32(model.bootstrap_seed);
+  const order = oddsRows.map((_, i) => i);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [order[i], order[j]] = [order[j]!, order[i]!];
+  }
+  const cv3: { y: number; s: number }[] = [];
+  for (let f = 0; f < 5; f++) {
+    const testIdx = new Set(order.filter((_, i) => i % 5 === f));
+    const train = oddsRows.filter((_, i) => !testIdx.has(i));
+    const pred = fitOdds3(train);
+    for (const i of testIdx) cv3.push({ y: oddsRows[i]!.y, s: pred(oddsRows[i]!.x) });
+  }
+  const cvAuc3 = aucOf3(cv3);
+  const tsTrain3 = oddsRows.filter((r) => r.listed_at === null || r.listed_at < '2025-01-01');
+  const tsTest3 = oddsRows.filter((r) => r.listed_at !== null && r.listed_at >= '2025-01-01');
+  const tsPred3 = fitOdds3(tsTrain3);
+  const tsAuc3 = aucOf3(tsTest3.map((r) => ({ y: r.y, s: tsPred3(r.x) })));
+  rows.push({
+    term: 'Token odds: 7-day growth feature',
+    with_x: null,
+    without_x: null,
+    with_auc: round4(cvAuc3),
+    without_auc: round4(odds.cv_auc),
+    kept: false,
+    note:
+      'Growth lifts 5-fold CV AUC ' +
+      odds.cv_auc.toFixed(3) +
+      ' to ' +
+      cvAuc3.toFixed(3) +
+      ' and time-split ' +
+      odds.time_split_auc.toFixed(3) +
+      ' to ' +
+      tsAuc3.toFixed(3) +
+      ' — inside noise, not kept.',
+  });
+  return rows;
+}
+
 /** The interval bands from the final rung's LOO residuals, split young/old,
  *  and their held-out hit rates (LOO per group, and walk-forward). */
 export function fitIntervals(
@@ -1259,68 +1522,111 @@ export function fitIntervals(
  * years (unknown age counts as 1 year). Deterministic gradient descent on
  * standardised features, 3000 steps; the returned coefficients are in raw
  * units, so odds = 1 / (1 + exp(-(b0 + b1*log10(TVL) + b2*age_years))).
+ * The in-sample AUC is reported alongside two held-out ones, so the
+ * odds are tested held-out twice like every other term: a 5-fold CV
+ * (fixed-seed shuffle) and a time split (fit on listings before
+ * 2025-01-01 or undated, test on listings from 2025 on). A 7-day-growth
+ * feature was tested the same way and not kept: 5-fold CV AUC 0.641
+ * to 0.645, inside noise, so the model stays two features.
  */
 export function fitTokenOdds(snapshot: Snapshot): FitResult['token_odds'] {
-  const rows = snapshot.protocols.map((p) => {
+  type OddsRow = { y: number; x1: number; x2: number; age: number | null; listed_at: string | null };
+  const rows: OddsRow[] = snapshot.protocols.map((p) => {
     const age = ageDays(snapshot.as_of, p.listed_at);
     return {
       y: p.gecko_id !== null || p.symbol !== null || p.mcap_usd !== null ? 1 : 0,
       x1: Math.log10(Math.max(1, p.tvl_usd)),
       x2: (age ?? 365) / 365,
       age,
+      listed_at: p.listed_at,
     };
   });
+  // One logistic fit by gradient descent on standardised features.
+  const fitLogistic = (train: OddsRow[]): { intercept: number; per_log10_tvl: number; per_age_year: number; predict: (r: OddsRow) => number } => {
+    const n = train.length;
+    const m1 = train.reduce((s, r) => s + r.x1, 0) / n;
+    const m2 = train.reduce((s, r) => s + r.x2, 0) / n;
+    const s1 = Math.sqrt(train.reduce((s, r) => s + (r.x1 - m1) ** 2, 0) / n);
+    const s2 = Math.sqrt(train.reduce((s, r) => s + (r.x2 - m2) ** 2, 0) / n);
+    let b0 = 0;
+    let b1 = 0;
+    let b2 = 0;
+    for (let it = 0; it < 3000; it++) {
+      let g0 = 0;
+      let g1 = 0;
+      let g2 = 0;
+      for (const r of train) {
+        const z1 = (r.x1 - m1) / s1;
+        const z2 = (r.x2 - m2) / s2;
+        const pr = 1 / (1 + Math.exp(-(b0 + b1 * z1 + b2 * z2)));
+        const d = pr - r.y;
+        g0 += d;
+        g1 += d * z1;
+        g2 += d * z2;
+      }
+      const lr = 0.1 / n;
+      b0 -= lr * g0;
+      b1 -= lr * g1;
+      b2 -= lr * g2;
+    }
+    const intercept = b0 - (b1 * m1) / s1 - (b2 * m2) / s2;
+    const perLog10Tvl = b1 / s1;
+    const perAgeYear = b2 / s2;
+    return {
+      intercept,
+      per_log10_tvl: perLog10Tvl,
+      per_age_year: perAgeYear,
+      predict: (r: OddsRow) => 1 / (1 + Math.exp(-(intercept + perLog10Tvl * r.x1 + perAgeYear * r.x2))),
+    };
+  };
+  const aucOf = (scored: { y: number; s: number }[]): number => {
+    const pos = scored.filter((r) => r.y === 1);
+    const neg = scored.filter((r) => r.y === 0);
+    let wins = 0;
+    let ties = 0;
+    for (const a of pos) {
+      for (const b of neg) {
+        if (a.s > b.s) wins++;
+        else if (a.s === b.s) ties++;
+      }
+    }
+    return (wins + 0.5 * ties) / (pos.length * neg.length);
+  };
+  const full = fitLogistic(rows);
+  const oddsOf = (r: OddsRow): number => full.predict(r);
+  const auc = aucOf(rows.map((r) => ({ y: r.y, s: oddsOf(r) })));
+  // 5-fold CV: fixed-seed shuffle, refit on the other four folds.
+  const rand = mulberry32(MODEL.bootstrap_seed);
+  const order = rows.map((_, i) => i);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [order[i], order[j]] = [order[j]!, order[i]!];
+  }
+  const cvScores: { y: number; s: number }[] = [];
+  for (let f = 0; f < 5; f++) {
+    const testIdx = new Set(order.filter((_, i) => i % 5 === f));
+    const train = rows.filter((_, i) => !testIdx.has(i));
+    const foldFit = fitLogistic(train);
+    for (const i of testIdx) cvScores.push({ y: rows[i]!.y, s: foldFit.predict(rows[i]!) });
+  }
+  const cvAuc = aucOf(cvScores);
+  // Time split: fit on listings before 2025-01-01 or undated, test on 2025 listings.
+  const tsTrain = rows.filter((r) => r.listed_at === null || r.listed_at < '2025-01-01');
+  const tsTest = rows.filter((r) => r.listed_at !== null && r.listed_at >= '2025-01-01');
+  const tsFit = fitLogistic(tsTrain);
+  const timeSplitAuc = aucOf(tsTest.map((r) => ({ y: r.y, s: tsFit.predict(r) })));
   const n = rows.length;
-  const m1 = rows.reduce((s, r) => s + r.x1, 0) / n;
-  const m2 = rows.reduce((s, r) => s + r.x2, 0) / n;
-  const s1 = Math.sqrt(rows.reduce((s, r) => s + (r.x1 - m1) ** 2, 0) / n);
-  const s2 = Math.sqrt(rows.reduce((s, r) => s + (r.x2 - m2) ** 2, 0) / n);
-  let b0 = 0;
-  let b1 = 0;
-  let b2 = 0;
-  for (let it = 0; it < 3000; it++) {
-    let g0 = 0;
-    let g1 = 0;
-    let g2 = 0;
-    for (const r of rows) {
-      const z1 = (r.x1 - m1) / s1;
-      const z2 = (r.x2 - m2) / s2;
-      const pr = 1 / (1 + Math.exp(-(b0 + b1 * z1 + b2 * z2)));
-      const d = pr - r.y;
-      g0 += d;
-      g1 += d * z1;
-      g2 += d * z2;
-    }
-    const lr = 0.1 / n;
-    b0 -= lr * g0;
-    b1 -= lr * g1;
-    b2 -= lr * g2;
-  }
-  const intercept = b0 - (b1 * m1) / s1 - (b2 * m2) / s2;
-  const perLog10Tvl = b1 / s1;
-  const perAgeYear = b2 / s2;
-  const oddsOf = (r: (typeof rows)[number]): number =>
-    1 / (1 + Math.exp(-(intercept + perLog10Tvl * r.x1 + perAgeYear * r.x2)));
   const pos = rows.filter((r) => r.y === 1);
-  const neg = rows.filter((r) => r.y === 0);
-  let wins = 0;
-  let ties = 0;
-  for (const a of pos) {
-    const pa = oddsOf(a);
-    for (const b of neg) {
-      const pb = oddsOf(b);
-      if (pa > pb) wins++;
-      else if (pa === pb) ties++;
-    }
-  }
-  const auc = (wins + 0.5 * ties) / (pos.length * neg.length);
   const young = rows.filter((r) => (r.age ?? 365) < 180);
   const old = rows.filter((r) => (r.age ?? 0) >= 730);
   return {
-    intercept,
-    per_log10_tvl: perLog10Tvl,
-    per_age_year: perAgeYear,
+    intercept: full.intercept,
+    per_log10_tvl: full.per_log10_tvl,
+    per_age_year: full.per_age_year,
     auc,
+    cv_auc: cvAuc,
+    time_split_auc: timeSplitAuc,
+    time_split_test_n: tsTest.length,
     base_rate: pos.length / n,
     young_rate: young.length > 0 ? young.filter((r) => r.y === 1).length / young.length : 0,
     old_rate: old.length > 0 ? old.filter((r) => r.y === 1).length / old.length : 0,
@@ -1345,8 +1651,9 @@ export function tokenOdds(
 
 /** The fitted value of one protocol: the curve, the sector step, the
  *  ensemble step and the compressed growth/age step, as far as the
- *  ladder kept them. Every step is returned, so the dashboard can show
- *  the value multiplied out term by term. */
+ *  ladder kept them, times the kinship factor when the protocol's
+ *  name stem already carries a traded token. Every step is returned,
+ *  so the dashboard can show the value multiplied out term by term. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
@@ -1356,6 +1663,7 @@ export function impliedValue(
   chosen: { blend_weight: number; growth_clamp: number; age_shrink: number },
   finalLevel: string,
   model: ModelConstants,
+  kin = false,
 ): {
   implied: number;
   sector: string;
@@ -1367,6 +1675,7 @@ export function impliedValue(
   baseUsd: number;
   growthMult: number;
   ageMult: number;
+  kinshipMult: number;
   age: number | null;
 } {
   const age = ageDays(asOf, protocol.listed_at);
@@ -1391,8 +1700,10 @@ export function impliedValue(
   } else if (finalLevel === 'L1') {
     baseUsd = curveUsd;
   }
+  const kinshipMult = kin ? model.kinship_factor : 1;
+  baseUsd *= kinshipMult;
   const implied = Math.max(1, Math.round(baseUsd));
-  return { implied, sector, curveUsd, sectorUsd, tsUsd, ensembleUsd, blendedUsd, baseUsd, growthMult, ageMult, age };
+  return { implied, sector, curveUsd, sectorUsd, tsUsd, ensembleUsd, blendedUsd, baseUsd, growthMult, ageMult, kinshipMult, age };
 }
 
 /** A row's low/high from its age group's P25-P75 factors. */
@@ -1889,6 +2200,7 @@ export function scoreProtocol(
   comps: CleanComp[],
   oddsFit: FitResult['token_odds'],
   model: ModelConstants,
+  kin = false,
 ): {
   implied: number;
   sector: string;
@@ -1900,16 +2212,19 @@ export function scoreProtocol(
   baseUsd: number;
   growthMult: number;
   ageMult: number;
+  kinshipMult: number;
+  kin: boolean;
   age: number | null;
   low: number;
   high: number;
   comps: string[];
   odds: number;
 } {
-  const v = impliedValue(p, asOf, curve, ens, ctx, chosen, finalLevel, model);
+  const v = impliedValue(p, asOf, curve, ens, ctx, chosen, finalLevel, model, kin);
   const band = intervalFor(v.implied, v.age, intervals, model);
   return {
     ...v,
+    kin,
     low: band.low,
     high: band.high,
     comps: nearestComps(v.sector, p.tvl_usd, comps),
@@ -1932,6 +2247,7 @@ export function bootstrapRankRanges(
   chosen: { blend_weight: number; growth_clamp: number; age_shrink: number },
   finalLevel: string,
   model: ModelConstants,
+  kinSlugs: Set<string> = new Set(),
 ): { ranges: Map<string, { lo: number; hi: number }>; stats: RefitStats } {
   const rand = mulberry32(model.bootstrap_seed);
   const ranksBySlug = new Map<string, number[]>();
@@ -1945,9 +2261,10 @@ export function bootstrapRankRanges(
     const ctx: GrowthAgeCtx = { slope_ts: curve.slope, age_slope: age.slope, mean_age_years: age.mean_age_years };
     const scored = rows.map((r) => {
       const sector = sectorOf(r.category);
-      const value = Math.exp(
-        finalLogPredict(finalLevel, r.tvl_usd, sector, r.category, r.change_7d, r.age_days, r.chains.length, curve, ens, ctx, chosen, model),
-      );
+      const value =
+        Math.exp(
+          finalLogPredict(finalLevel, r.tvl_usd, sector, r.category, r.change_7d, r.age_days, r.chains.length, curve, ens, ctx, chosen, model),
+        ) * (kinSlugs.has(r.slug) ? model.kinship_factor : 1);
       return { slug: r.slug, tvl: r.tvl_usd, value };
     });
     scored.sort(
@@ -2006,6 +2323,7 @@ export function fitModel(
     age_slope_log_per_year: ageFit.slope,
     mean_age_years: ageFit.mean_age_years,
   };
+  const termTests = fitTermTests(comps, snapshot, model, chosenFull, odds);
   // In-sample R^2 of the final (kept) model on the cleaned comps.
   const actuals = comps.map((p) => Math.log(p.mcap_usd));
   const meanY = actuals.reduce((s, v) => s + v, 0) / actuals.length;
@@ -2051,6 +2369,7 @@ export function fitModel(
     twoway: { n: comps.length, within3, within2 },
     intervals,
     token_odds: odds,
+    term_tests: termTests,
   };
   return { fit, comps, curve: curve0, ens: ens0, ctx, chosen: chosenFull, odds, intervals, finalLevel: final_level };
 }
@@ -2088,8 +2407,10 @@ export function buildBoard(
     if (!chosen.has(p.slug) && isRankable(p)) chosen.set(p.slug, p);
   }
 
+  const stems = tradedStems(snapshot);
   const scored = [...chosen.values()].map((p) => {
-    const s = scoreProtocol(p, snapshot.as_of, f.curve, f.ens, f.ctx, f.chosen, f.finalLevel, f.intervals, f.comps, f.odds, model);
+    const kin = stems.has(nameStem(p.name));
+    const s = scoreProtocol(p, snapshot.as_of, f.curve, f.ens, f.ctx, f.chosen, f.finalLevel, f.intervals, f.comps, f.odds, model, kin);
     return { p, ...s };
   });
   scored.sort(
@@ -2099,6 +2420,7 @@ export function buildBoard(
       (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0),
   );
   // Rank ranges over 200 bootstrap refits of the comps.
+  const kinSlugs = new Set(scored.filter((s) => s.kin).map((s) => s.p.slug));
   const { ranges, stats } = bootstrapRankRanges(
     scored.map((s) => ({
       slug: s.p.slug,
@@ -2112,6 +2434,7 @@ export function buildBoard(
     f.chosen,
     f.finalLevel,
     model,
+    kinSlugs,
   );
   const rows: BoardRow[] = scored.map((s, i) => {
     const range = ranges.get(s.p.slug)!;
@@ -2141,6 +2464,8 @@ export function buildBoard(
         base_usd: Math.round(s.baseUsd),
         growth_multiplier: round4(s.growthMult),
         age_multiplier: round4(s.ageMult),
+        kinship_multiplier: round4(s.kinshipMult),
+        kin: s.kin,
         token_odds: round4(s.odds),
         odds_adjusted_usd: Math.round(s.implied * s.odds),
         low_usd: s.low,
@@ -2257,6 +2582,8 @@ export function radarRow(row: BoardRow): RadarRow {
     blended_usd: row.model.blended_usd,
     growth_mult: row.model.growth_multiplier,
     age_mult: row.model.age_multiplier,
+    kinship_mult: row.model.kinship_multiplier,
+    kin: row.model.kin,
     token_odds: row.model.token_odds,
     low_usd: row.model.low_usd,
     high_usd: row.model.high_usd,
